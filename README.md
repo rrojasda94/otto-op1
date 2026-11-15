@@ -16,9 +16,15 @@ DSP portada de [OTTO](https://github.com/bitfieldaudio/OTTO) (Bitfield Audio).
   - Grilla de 16 pasos por pad. Con **REC PATRON** y PLAY activos, lo que tocas en los pads se graba cuantizado a 1/16.
   - Euclid de 4 canales.
   - Arpegiador (up, down, updown, random y orden de tocado).
+- **Secuencia de notas por motor:** 16 pasos. Activa **REC NOTAS** con PLAY y toca el teclado; también puedes hacer clic en las celdas y usar la rueda del mouse para subir o bajar la nota.
+- **Presets por motor:** en la pestaña MOTOR, ponle nombre y pulsa **Guardar preset**. Se guardan en `presets/<MOTOR>/*.json`. Las acciones MIDI `preset_next` y `preset_prev` los recorren.
+- **Cargar samples:** WAV, MP3 o FLAC, y funciona con rutas con acentos o "ñ".
+  - Para cambiar el sonido de un pad: arrástrale un archivo encima o usa clic derecho → **Cargar sample...**.
+  - Para el SAMPLER: arrastra el archivo a cualquier otra parte de la ventana o usa **Abrir archivo...** en MOTOR.
 - **Cinta:** 4 pistas estéreo en loop (de 1 a 16 compases, máximo 64 s) con overdub y faders.
   - **Guardar** crea `project.json` más un `trackN.wav` por pista.
   - **Exportar mezcla WAV** crea `mezcla.wav`.
+  - Velocidad variable (de 0,25x a 2x), **REVERSA**, **TAPE STOP** (frenado de cinta) y punto de inicio y fin del loop. Los cuatro controles están en la pestaña CINTA y se pueden asignar por MIDI.
 - **Pantalla estilo OP-1:**
   - Dibujo propio de cada motor: algoritmo FM, curva del filtro, cuerda vibrando, cluster o forma de onda del sample.
   - Casete con carretes que giran y forma de onda de cada pista.

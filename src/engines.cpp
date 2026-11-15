@@ -4,7 +4,6 @@
 
 #include <Gamma/Envelope.h>
 #include <Gamma/Oscillator.h>
-#include <dr_wav.h>
 
 namespace otto {
 
@@ -734,19 +733,11 @@ namespace otto {
   {
     auto* s = dynamic_cast<smp::Engine*>(&e);
     if (!s) return false;
-    unsigned ch = 0, sr = 0;
-    drwav_uint64 frames = 0;
-    float* d = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &ch, &sr, &frames, nullptr);
-    if (!d) return false;
+    std::vector<float> mono;
+    unsigned sr = 0;
+    if (!read_audio_mono(path, mono, sr)) return false;
     int slot = 1 - s->cur.load();
-    auto& b = s->buf[size_t(slot)];
-    b.assign(static_cast<size_t>(frames), 0.f);
-    for (size_t f = 0; f < frames; f++) {
-      float x = 0;
-      for (unsigned c = 0; c < ch; c++) x += d[f * ch + c];
-      b[f] = x / float(ch);
-    }
-    drwav_free(d, nullptr);
+    s->buf[size_t(slot)] = std::move(mono);
     s->sr_ratio[size_t(slot)] = float(sr) / kSR;
     s->name = path;
     s->cur.store(slot); // ponytail: voices mid-note jump into the new buffer; bounds-checked, no crash

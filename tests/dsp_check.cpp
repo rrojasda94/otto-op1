@@ -75,6 +75,46 @@ int main()
   auto wav = (std::filesystem::temp_directory_path() / "otto_mix_check.wav").string();
   assert(st->export_mix(wav) && std::filesystem::file_size(wav) > 1000);
   std::filesystem::remove(wav);
+
+  // unicode path (ñ/á) round-trip: export mix, then load it into a pad and into the sampler
+  auto dir = std::filesystem::temp_directory_path() / std::filesystem::path(u8"otto_ñandú_check");
+  auto uwav = dir / "mezcla.wav";
+  auto u8 = uwav.u8string();
+  std::string upath(u8.begin(), u8.end());
+  assert(st->export_mix(upath) && "export to unicode path");
+  assert(st->drums.load_pad(7, upath) && "pad loads from unicode path");
+  assert(sampler_load(*st->synths.back(), upath) && "sampler loads from unicode path");
+  std::filesystem::remove_all(dir);
+
+  // melodic sequencer: only notes, no drums -> synth sounds on its own
+  st->ui_q.push({Ev::Stop});
+  for (auto& pat : st->steps)
+    for (auto& s : pat) s = 0;
+  for (auto& t : st->tape.mute) t = true;
+  st->synth_sel->set(0);
+  st->melody[0][0] = 60;
+  st->melody[0][4] = 67;
+  st->ui_q.push({Ev::Play});
+  float mel_peak = 0;
+  for (int b = 0; b < 200; b++) {
+    st->process(buf.data(), 256);
+    for (float s : buf) mel_peak = std::max(mel_peak, std::abs(s));
+  }
+  std::printf("melody peak %.3f\n", mel_peak);
+  assert(mel_peak > 0.01f && "melodic sequence plays");
+
+  // reverse: head moves backwards
+  st->tape_rev->set(1);
+  size_t p0 = st->tape_pos;
+  st->process(buf.data(), 256);
+  size_t p1 = st->tape_pos;
+  assert((p1 < p0 || p1 > p0 + 1000) && "reverse moves the head backwards (or wraps)");
+  st->tape_rev->set(0);
+
+  // tape stop halts transport after the slow-down
+  st->ui_q.push({Ev::TapeStop});
+  for (int b = 0; b < int(kSR * 0.8f / 256); b++) st->process(buf.data(), 256);
+  assert(!st->playing && "tape stop ends playback");
   std::puts("OK");
   return 0;
 }
