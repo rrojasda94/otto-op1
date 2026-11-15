@@ -1,0 +1,9 @@
+otto-op1
+Derived from OTTO, Copyright 2021 Bitfield Audio.
+
+This work is licensed under the Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International License (CC BY-NC-SA 4.0).
+Full text: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+Changes: DSP of the OTTO.FM, Nuke and Wormhole engines ported to a standalone
+Windows application (RtAudio/RtMidi/Dear ImGui) with new sequencer, tape and UI code.
