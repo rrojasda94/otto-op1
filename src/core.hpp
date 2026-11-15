@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <memory>
 #include <numbers>
 #include <string>
@@ -146,10 +147,21 @@ namespace otto {
   const std::vector<float>* sampler_data(Engine& e);
 
   // ---------- drum sampler (8 pads) ----------
+  /// UTF-8 string -> filesystem path (keeps accents/ñ working on Windows)
+  std::filesystem::path u8path(const std::string& s);
+  /// Decode WAV / MP3 / FLAC. false if unreadable.
+  bool read_audio(const std::string& utf8_path, std::vector<float>& interleaved, unsigned& channels, unsigned& sr);
+  bool read_audio_mono(const std::string& utf8_path, std::vector<float>& mono, unsigned& sr);
+
   struct Drums {
     static constexpr int N = 8;
-    std::array<std::vector<float>, N> smp;
-    std::array<float, N> rate_base{};
+    // double buffer per pad: UI loads into the inactive slot, then flips cur (audio never sees a half-written vector)
+    std::array<std::array<std::vector<float>, 2>, N> slot;
+    std::array<std::array<float, 2>, N> rate_base{};
+    std::array<std::atomic<int>, N> cur{};
+    std::array<std::string, N> names;
+    const std::vector<float>& smp(size_t i) const { return slot[i][size_t(cur[i].load(std::memory_order_relaxed))]; }
+    bool load_pad(int pad, const std::string& utf8_path); // UI thread
     std::array<double, N> pos{};
     std::array<bool, N> playing{};
     Param *vol, *tune;
@@ -243,7 +255,7 @@ namespace otto {
 
   // ---------- events into the audio thread ----------
   struct Ev {
-    enum Type : uint8_t { NoteOn, NoteOff, Drum, Bend, Play, Stop, TogglePlay, ToggleRec, ClearTrack, AllOff };
+    enum Type : uint8_t { NoteOn, NoteOff, Drum, Bend, Play, Stop, TogglePlay, ToggleRec, ClearTrack, AllOff, TapeStop };
     Type t;
     int a = 0;
     float b = 0;
@@ -275,6 +287,19 @@ namespace otto {
     int mod_index() const { return std::clamp(synth_sel->geti(), 0, kMods - 1); }
     Pattern& cur_steps() { return steps[size_t(mod_index())]; }
     Euclid& cur_euclid() { return euclids[size_t(mod_index())]; }
+
+    // Melodic 16-step sequence per module: MIDI note per step, -1 = rest. Keys record into it with note_rec.
+    using Melody = std::array<std::atomic<int>, 16>;
+    std::array<Melody, kMods> melody;
+    Melody& cur_melody() { return melody[size_t(mod_index())]; }
+    std::atomic<bool> note_rec{false};
+    std::atomic<int> last_note{60};
+    Param* seq_gate;
+
+    // Tape transport extras (OP-1 style): varispeed, reverse, loop in/out, tape stop
+    Param *tape_speed, *tape_rev, *loop_in, *loop_out;
+    std::atomic<bool> tape_stopping{false};
+    std::atomic<int> preset_nav{0}; // +1/-1 requested by MIDI, consumed by the UI
     std::atomic<bool> step_rec{false};
     // for the UI: hit counters per pad, held keys bitmask, oscilloscope ring
     std::array<std::atomic<uint32_t>, Drums::N> pad_hits{};
@@ -297,6 +322,10 @@ namespace otto {
     void hit_pad(int pad, float vel);
     void set_held(int note, bool on);
     int cur_synth = 0;
+    double tpos = 0;          // fractional tape head
+    float stop_ramp = 1;      // 1 -> 0 during tape stop
+    int seq_sounding = -1;    // note held by the melodic sequencer
+    double seq_off = 0;       // samples until its note-off
     float bend = 0, vib_ph = 0;
     bool arp_was_on = false;
   };

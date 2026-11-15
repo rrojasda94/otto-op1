@@ -71,6 +71,11 @@ namespace otto {
       st.synth_sel->set(float((st.synth_sel->geti() + 1) % int(st.synths.size())));
       st.page = 0;
     } else if (a == "arp") st.arp.on->set(st.arp.on->geti() ? 0.f : 1.f);
+    else if (a == "tapestop") st.midi_q.push({Ev::TapeStop});
+    else if (a == "reverse") st.tape_rev->set(st.tape_rev->geti() ? 0.f : 1.f);
+    else if (a == "note_rec") st.note_rec = !st.note_rec;
+    else if (a == "preset_next") st.preset_nav += 1;
+    else if (a == "preset_prev") st.preset_nav -= 1;
   }
 
   void Midi::on_msg(const unsigned char* m, size_t n)

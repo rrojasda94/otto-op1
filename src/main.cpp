@@ -18,6 +18,21 @@
 using namespace otto;
 namespace fs = std::filesystem;
 
+std::string open_audio_dialog(); // filedialog.cpp
+
+static std::string utf8(const fs::path& p)
+{
+  auto s = p.u8string();
+  return std::string(s.begin(), s.end());
+}
+
+static std::string note_name(int n)
+{
+  static const char* names[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+  if (n < 0) return "-";
+  return std::string(names[n % 12]) + std::to_string(n / 12 - 1);
+}
+
 // ---------------------------------------------------------------- palette
 // OTTO encoder colours + one hue per engine / pad
 static const ImU32 kEnc[4] = {IM_COL32(58, 134, 255, 255), IM_COL32(56, 200, 90, 255), IM_COL32(245, 245, 245, 255),
@@ -381,7 +396,47 @@ struct UI {
   float reel = 0, energy = 0, time = 0;
   char proj[260]{}, wav[260]{};
   std::string status;
+  std::array<ImVec4, 8> pad_rect{}; // x0,y0,x1,y1 for drag & drop onto pads
+  // presets of the selected engine
+  std::vector<std::string> presets;
+  std::string presets_for;
+  int preset_idx = -1;
+  char preset_name[64] = "mi sonido";
 };
+
+static fs::path preset_dir(UI& u) { return u.base / "presets" / u.st.synth().title; }
+
+static void refresh_presets(UI& u)
+{
+  u.presets.clear();
+  std::error_code ec;
+  for (auto& e : fs::directory_iterator(preset_dir(u), ec))
+    if (e.path().extension() == ".json") u.presets.push_back(utf8(e.path().stem()));
+  std::sort(u.presets.begin(), u.presets.end());
+  u.presets_for = u.st.synth().title;
+}
+
+static bool save_preset(UI& u, const std::string& name)
+{
+  std::error_code ec;
+  fs::create_directories(preset_dir(u), ec);
+  nlohmann::json j;
+  for (auto* p : u.st.synth().params) j[p->id] = p->get();
+  std::ofstream f(preset_dir(u) / u8path(name + ".json"));
+  f << j.dump(2);
+  refresh_presets(u);
+  return bool(f);
+}
+
+static bool load_preset(UI& u, const std::string& name)
+{
+  std::ifstream f(preset_dir(u) / u8path(name + ".json"));
+  auto j = nlohmann::json::parse(f, nullptr, false);
+  if (!f || j.is_discarded()) return false;
+  for (auto& [id, v] : j.items())
+    if (auto* p = registry().find(id); p && v.is_number()) p->set(v.get<float>());
+  return true;
+}
 
 static void header(UI& u)
 {
@@ -521,6 +576,9 @@ static void screen(UI& u, float H)
       pk = std::min(pk, 1.f) * th * 0.5f;
       if (pk > 0.5f) dl->AddLine({a.x + float(c), mid - pk}, {a.x + float(c), mid + pk}, col);
     }
+    float li = st.loop_in->get(), lo2 = st.loop_out->get();
+    if (li > 0) dl->AddRectFilled(a, {a.x + li * float(cols), b.y}, IM_COL32(0, 0, 0, 150));
+    if (lo2 < 1) dl->AddRectFilled({a.x + lo2 * float(cols), a.y}, b, IM_COL32(0, 0, 0, 150));
     float x = a.x + frac * float(cols);
     dl->AddLine({x, a.y}, {x, b.y}, IM_COL32(255, 255, 255, 180), 2);
   }
@@ -646,21 +704,76 @@ static void pads(UI& u, ImVec2 size)
     ImGui::PushID(i);
     ImGui::InvisibleButton("pad", {pw, ph});
     if (ImGui::IsItemActivated()) st.ui_q.push({Ev::Drum, i, 0.9f});
+    if (ImGui::IsItemHovered())
+      ImGui::SetTooltip("%s\nclic derecho o arrastra un audio aqui para cambiarlo",
+                        st.drums.names[size_t(i)].empty() ? "kit interno" : st.drums.names[size_t(i)].c_str());
+    if (ImGui::BeginPopupContextItem("padmenu")) {
+      if (ImGui::MenuItem("Cargar sample...")) {
+        auto path = open_audio_dialog();
+        if (!path.empty()) u.status = st.drums.load_pad(i, path) ? "Pad cargado" : "No se pudo leer el audio";
+      }
+      ImGui::EndPopup();
+    }
     ImGui::PopID();
+    u.pad_rect[size_t(i)] = {a.x, a.y, b.x, b.y};
     float f = u.flash[size_t(i)];
     float grow = f * 4;
     if (f > 0.05f) dl->AddRectFilled({a.x - grow, a.y - grow}, {b.x + grow, b.y + grow}, scale_col(kPadCol[i], 0.4f * f), 12);
     dl->AddRectFilled(a, b, scale_col(kPadCol[i], 0.35f + 0.65f * f), 10);
-    dl->AddText({a.x + 8, a.y + 6}, f > 0.5f ? IM_COL32(10, 10, 12, 230) : IM_COL32(255, 255, 255, 220), kPadNames[i]);
+    ImU32 tc = f > 0.5f ? IM_COL32(10, 10, 12, 230) : IM_COL32(255, 255, 255, 220);
+    dl->AddText({a.x + 8, a.y + 6}, tc, kPadNames[i]);
+    if (!st.drums.names[size_t(i)].empty()) dl->AddText({a.x + 8, b.y - 22}, tc, st.drums.names[size_t(i)].substr(0, 14).c_str());
   }
   ImGui::SetCursorScreenPos({o.x, o.y + size.y});
   ImGui::Dummy({0, 0});
+}
+
+static void melody_row(UI& u)
+{
+  auto& st = u.st;
+  auto* dl = ImGui::GetWindowDrawList();
+  ImU32 col = kEngineCol[st.synth_sel->geti() % 5];
+  bool nrec = st.note_rec;
+  if (pill(nrec ? "REC NOTAS  ON" : "REC NOTAS", nrec, kEnc[3], {150, 28})) st.note_rec = !nrec;
+  if (ImGui::IsItemHovered()) ImGui::SetTooltip("Con PLAY activo, lo que toques en el teclado se graba en la secuencia de este motor");
+  ImGui::SameLine();
+  if (ImGui::Button("Borrar notas"))
+    for (auto& n : st.cur_melody()) n = -1;
+  ImGui::SameLine();
+  ImGui::TextDisabled("clic = ultima nota (%s)  der = silencio  rueda = +/-1", note_name(st.last_note).c_str());
+  slider(*st.seq_gate);
+
+  int cur = st.playing ? std::max(0, int(st.step)) % 16 : -1;
+  ImVec2 o = ImGui::GetCursorScreenPos();
+  float W = ImGui::GetContentRegionAvail().x, cw = (W - 70) / 16.f, chh = 34;
+  dl->AddText({o.x, o.y + 8}, col, st.synth().title.c_str());
+  for (int s = 0; s < 16; s++) {
+    auto& cell = st.cur_melody()[size_t(s)];
+    int n = cell;
+    ImVec2 a{o.x + 64 + float(s) * cw, o.y}, b{a.x + cw - 3, a.y + chh};
+    ImGui::SetCursorScreenPos(a);
+    ImGui::PushID(1000 + s);
+    if (ImGui::InvisibleButton("n", {cw - 3, chh}, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight)) {
+      if (ImGui::IsMouseReleased(ImGuiMouseButton_Right)) cell = -1;
+      else cell = st.last_note.load();
+    }
+    if (ImGui::IsItemHovered() && ImGui::GetIO().MouseWheel != 0 && n >= 0)
+      cell = std::clamp(n + int(ImGui::GetIO().MouseWheel), 0, 127);
+    ImGui::PopID();
+    ImU32 c = n >= 0 ? col : (s % 4 == 0 ? IM_COL32(44, 44, 50, 255) : IM_COL32(34, 34, 40, 255));
+    if (s == cur) c = n >= 0 ? IM_COL32(255, 255, 255, 255) : IM_COL32(70, 70, 80, 255);
+    dl->AddRectFilled(a, b, c, 6);
+    if (n >= 0) dl->AddText({a.x + 5, a.y + 9}, IM_COL32(10, 10, 12, 255), note_name(n).c_str());
+  }
+  ImGui::SetCursorScreenPos({o.x, o.y + chh + 8});
+  ImGui::Separator();
 }
 
 static void tab_sequence(UI& u)
 {
   auto& st = u.st;
   auto* dl = ImGui::GetWindowDrawList();
+  melody_row(u);
   bool srec = st.step_rec;
   if (pill(srec ? "REC PATRON  ON" : "REC PATRON", srec, kEnc[3], {150, 28})) st.step_rec = !srec;
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Con PLAY activo, lo que toques en los pads se graba cuantizado a 1/16");
@@ -748,6 +861,20 @@ static void tab_tape(UI& u)
     ImGui::SameLine(0, 18);
   }
   ImGui::BeginGroup();
+  knob(st.tape_speed, kEngineCol[2], 30, "Velocidad");
+  ImGui::SameLine();
+  ImGui::BeginGroup();
+  if (pill("REVERSA", st.tape_rev->geti() != 0, kEngineCol[3], {110, 30})) st.tape_rev->set(st.tape_rev->geti() ? 0.f : 1.f);
+  if (pill("TAPE STOP", st.tape_stopping, kEnc[3], {110, 30})) st.ui_q.push({Ev::TapeStop});
+  if (ImGui::SmallButton("velocidad 1x")) st.tape_speed->set(1);
+  ImGui::EndGroup();
+  ImGui::SetNextItemWidth(260);
+  slider(*st.loop_in);
+  ImGui::SetNextItemWidth(260);
+  slider(*st.loop_out);
+  ImGui::EndGroup();
+  ImGui::SameLine(0, 18);
+  ImGui::BeginGroup();
   ImGui::TextDisabled("Proyecto (carpeta)");
   ImGui::SetNextItemWidth(-1);
   ImGui::InputText("##proj", u.proj, sizeof u.proj);
@@ -775,10 +902,35 @@ static void tab_engine(UI& u)
     ImGui::SetNextItemWidth(-120);
     ImGui::InputText("##wav", u.wav, sizeof u.wav);
     ImGui::SameLine();
-    if (ImGui::Button("Cargar WAV", {-1, 0})) u.status = sampler_load(eng, u.wav) ? "Sample cargado" : "No se pudo leer el WAV";
+    if (ImGui::Button("Cargar", {-1, 0})) u.status = sampler_load(eng, u.wav) ? "Sample cargado" : "No se pudo leer el audio";
+    if (ImGui::Button("Abrir archivo...")) {
+      auto path = open_audio_dialog();
+      if (!path.empty()) {
+        std::snprintf(u.wav, sizeof u.wav, "%s", path.c_str());
+        u.status = sampler_load(eng, path) ? "Sample cargado" : "No se pudo leer el audio";
+      }
+    }
+    ImGui::SameLine();
     if (!u.status.empty()) ImGui::TextDisabled("%s", u.status.c_str());
-    ImGui::TextDisabled("tip: arrastra un .wav a la ventana");
+    ImGui::TextDisabled("tip: arrastra un wav/mp3/flac a la ventana");
   }
+  // presets
+  if (u.presets_for != eng.title) refresh_presets(u);
+  ImGui::TextColored(ImColor(kEngineCol[st.synth_sel->geti() % 5]), "PRESETS %s", eng.title.c_str());
+  ImGui::SetNextItemWidth(200);
+  ImGui::InputText("##pname", u.preset_name, sizeof u.preset_name);
+  ImGui::SameLine();
+  if (ImGui::Button("Guardar preset") && u.preset_name[0])
+    u.status = save_preset(u, u.preset_name) ? "Preset guardado" : "No se pudo guardar el preset";
+  for (int i = 0; i < int(u.presets.size()); i++) {
+    if (i % 6) ImGui::SameLine();
+    if (pill(u.presets[size_t(i)].c_str(), i == u.preset_idx, kEngineCol[st.synth_sel->geti() % 5], {130, 0})) {
+      u.preset_idx = i;
+      load_preset(u, u.presets[size_t(i)]);
+    }
+  }
+  if (u.presets.empty()) ImGui::TextDisabled("sin presets: ajusta el sonido, ponle nombre y pulsa Guardar preset");
+  ImGui::Separator();
   for (auto* p : eng.params) slider(*p);
   slider(*st.mod);
   slider(*st.bend_range);
@@ -841,7 +993,8 @@ static void tab_io(UI& u)
   if (ImGui::Button("Guardar mapeo")) midi.save();
   ImGui::SameLine();
   static const char* actions[] = {"play", "stop", "rec", "clear", "page_next", "page_prev", "synth_next", "arp",
-                                  "track1", "track2", "track3", "track4"};
+                                  "track1", "track2", "track3", "track4", "tapestop", "reverse", "note_rec",
+                                  "preset_next", "preset_prev"};
   static int act = 0;
   ImGui::SetNextItemWidth(120);
   ImGui::Combo("##act", &act, actions, IM_ARRAYSIZE(actions));
@@ -959,11 +1112,20 @@ int main(int argc, char** argv)
   std::snprintf(ui.proj, sizeof ui.proj, "%s", (base / "proyectos" / "proyecto1").string().c_str());
   std::snprintf(ui.wav, sizeof ui.wav, "%s", (base / "samples" / "sampler.wav").string().c_str());
   // drag & drop a .wav onto the window -> sampler
-  glfwSetDropCallback(win, [](GLFWwindow*, int n, const char** paths) {
+  glfwSetDropCallback(win, [](GLFWwindow* w, int n, const char** paths) {
     if (n < 1 || !g_ui) return;
+    double mx, my;
+    glfwGetCursorPos(w, &mx, &my);
+    for (int i = 0; i < 8; i++) {
+      auto r = g_ui->pad_rect[size_t(i)];
+      if (mx >= r.x && mx < r.z && my >= r.y && my < r.w) {
+        g_ui->status = g_ui->st.drums.load_pad(i, paths[0]) ? "Pad cargado (arrastrado)" : "No se pudo leer el audio";
+        return;
+      }
+    }
     std::snprintf(g_ui->wav, sizeof g_ui->wav, "%s", paths[0]);
     g_ui->st.synth_sel->set(float(g_ui->st.synths.size() - 1));
-    g_ui->status = sampler_load(*g_ui->st.synths.back(), paths[0]) ? "Sample cargado (arrastrado)" : "No se pudo leer el WAV";
+    g_ui->status = sampler_load(*g_ui->st.synths.back(), paths[0]) ? "Sample cargado (arrastrado)" : "No se pudo leer el audio";
   });
 
   const ImGuiKey piano[] = {ImGuiKey_A, ImGuiKey_W, ImGuiKey_S, ImGuiKey_E, ImGuiKey_D, ImGuiKey_F, ImGuiKey_T, ImGuiKey_G,
@@ -1002,6 +1164,14 @@ int main(int argc, char** argv)
     ImGui::SetNextWindowSize({float(w), float(h)});
     ImGui::Begin("main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBringToFrontOnFocus);
 
+    if (int nav = st->preset_nav.exchange(0); nav != 0) {
+      if (ui.presets_for != st->synth().title) refresh_presets(ui);
+      if (!ui.presets.empty()) {
+        int n = int(ui.presets.size());
+        ui.preset_idx = ((ui.preset_idx + nav) % n + n) % n;
+        load_preset(ui, ui.presets[size_t(ui.preset_idx)]);
+      }
+    }
     header(ui);
     screen(ui, std::clamp(float(h) * 0.30f, 220.f, 320.f));
     ImGui::Spacing();
@@ -1012,7 +1182,7 @@ int main(int argc, char** argv)
     keyboard(ui, {W * 0.62f, 120});
     ImGui::SameLine(0, 16);
     pads(ui, {W * 0.38f - 16, 120});
-    ImGui::TextDisabled("teclado PC: A-L notas  Z/X octava  1-5 motor  espacio play  R rec  RePag/AvPag pagina  | arrastra un WAV para el sampler");
+    ImGui::TextDisabled("teclado PC: A-L notas  Z/X octava  1-5 motor  espacio play  R rec  RePag/AvPag pagina  | arrastra audio: a un pad o al sampler");
 
     ImGui::BeginChild("tabs", {0, 0}, ImGuiChildFlags_Border);
     if (ImGui::BeginTabBar("t")) {

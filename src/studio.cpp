@@ -101,6 +101,13 @@ namespace otto {
     bend_range = &R.add("studio.bend", "Rango Pitch Bend", 0, 12, 2, 0, true);
     master = &R.add("master.vol", "Master", 0, 1, 0.8f);
     rec_track = &R.add("tape.rec", "Pista armada", 0, 3, 0, 0, true);
+    seq_gate = &R.add("seq.gate", "Gate secuencia", 0.05f, 1, 0.5f);
+    tape_speed = &R.add("tape.speed", "Velocidad cinta", 0.25f, 2, 1);
+    tape_rev = &R.add("tape.rev", "Reversa", 0, 1, 0, 0, true);
+    loop_in = &R.add("tape.in", "Loop inicio", 0, 1, 0);
+    loop_out = &R.add("tape.out", "Loop fin", 0, 1, 1);
+    for (auto& m : melody)
+      for (auto& n : m) n = -1;
   }
 
   void Studio::hit_pad(int pad, float vel)
@@ -125,6 +132,11 @@ namespace otto {
     switch (e.t) {
       case Ev::NoteOn:
         set_held(e.a, true);
+        last_note = e.a;
+        if (note_rec && playing) { // quantize to nearest 16th of the melodic sequence
+          double spb16 = kSR * 60.0 / bpm->get() / 4.0;
+          cur_melody()[size_t(int(std::lround(tpos / spb16)) % 16)] = e.a;
+        }
         if (arp_on) arp.press(e.a);
         else synth().note_on(e.a, e.b);
         break;
@@ -147,8 +159,15 @@ namespace otto {
       case Ev::Stop:
         playing = false;
         recording = false;
+        tape_stopping = false;
+        stop_ramp = 1;
         tape_pos = 0;
+        tpos = 0;
         step = -1;
+        if (seq_sounding >= 0) { synth().note_off(seq_sounding); seq_sounding = -1; }
+        break;
+      case Ev::TapeStop:
+        if (playing) tape_stopping = true;
         break;
       case Ev::ToggleRec:
         recording = !recording;
@@ -174,6 +193,7 @@ namespace otto {
     if (sel != cur_synth) {
       synths[size_t(cur_synth)]->all_off();
       arp.sounding = -1;
+      seq_sounding = -1;
       cur_synth = sel;
     }
     Engine& eng = synth();
@@ -194,9 +214,19 @@ namespace otto {
     float modv = mod->get(), evol = eng.volume->get(), mvol = master->get();
     int rt = rec_track->geti();
     bool play = playing, rec = recording;
-    size_t pos = tape_pos;
-    if (pos >= loop) pos = 0;
+    bool stopping = tape_stopping;
+    // loop region quantized to 16ths, at least one 16th long
+    double lo = std::floor(loop_in->get() * double(loop) / spb16) * spb16;
+    double hi = std::max(lo + spb16, std::round(loop_out->get() * double(loop) / spb16) * spb16);
+    hi = std::min(hi, double(loop));
+    if (lo >= hi) lo = 0;
+    float dir = tape_rev->geti() ? -1.f : 1.f;
+    // ponytail: recording runs at 1x (direction kept); varispeed only on playback
+    float speed = rec ? dir : dir * tape_speed->get();
+    if (tpos < lo || tpos >= hi) tpos = dir > 0 ? lo : hi - 1;
     int last_step = step;
+    auto& mel = cur_melody();
+    float gate = seq_gate->get();
     float pk = 0;
 
     for (unsigned i = 0; i < frames; i++) {
@@ -205,10 +235,20 @@ namespace otto {
       eng.freq_mul = bendmul * (1 + modv * 0.02f * std::sin(2 * kPi * vib_ph));
       if (arp_on) arp.tick(eng, b);
 
+      if (seq_sounding >= 0 && (seq_off -= 1) <= 0) {
+        eng.note_off(seq_sounding);
+        seq_sounding = -1;
+      }
       if (play) {
-        int st = int(double(pos) / spb16);
+        int st = int(tpos / spb16);
         if (st != last_step) {
           last_step = st;
+          if (int n = mel[size_t(st % 16)].load(std::memory_order_relaxed); n >= 0) {
+            if (seq_sounding >= 0) eng.note_off(seq_sounding);
+            eng.note_on(n, 0.85f);
+            seq_sounding = n;
+            seq_off = spb16 * gate;
+          }
           for (auto& c : cur_euclid().ch)
             if (Euclid::hit(st, c.len->geti(), c.hits->geti(), c.rot->geti())) hit_pad(c.pad->geti(), 0.9f);
           for (int p = 0; p < Drums::N; p++)
@@ -224,19 +264,36 @@ namespace otto {
 
       float oL = L, oR = R;
       if (play) {
+        float sp = speed * stop_ramp;
+        size_t i0 = size_t(tpos), i1 = i0 + 1 < size_t(hi) ? i0 + 1 : size_t(lo);
+        float fr = float(tpos - double(i0));
         for (size_t t = 0; t < Tape::T; t++) {
-          float* s = &tape.trk[t][pos * 2];
-          if (rec && int(t) == rt) { // overdub
-            s[0] += L;
-            s[1] += R;
+          float* a = &tape.trk[t][i0 * 2];
+          const float* b2 = &tape.trk[t][i1 * 2];
+          if (rec && int(t) == rt) { // overdub at 1x
+            a[0] += L;
+            a[1] += R;
           }
           if (!tape.mute[t]) {
             float v = tape.vol[t]->get();
-            oL += s[0] * v;
-            oR += s[1] * v;
+            oL += (a[0] + (b2[0] - a[0]) * fr) * v;
+            oR += (a[1] + (b2[1] - a[1]) * fr) * v;
           }
         }
-        if (++pos >= loop) pos = 0;
+        tpos += sp;
+        if (tpos >= hi) tpos = lo + std::fmod(tpos - hi, hi - lo);
+        if (tpos < lo) tpos = hi - std::fmod(lo - tpos, hi - lo);
+        if (stopping) { // OP-1 style tape stop: ~0.6 s slow-down, then halt
+          stop_ramp -= 1.f / (0.6f * kSR);
+          if (stop_ramp <= 0) {
+            stop_ramp = 1;
+            stopping = false;
+            play = false;
+            playing = false;
+            recording = false;
+            tape_stopping = false;
+          }
+        }
       }
       oL = std::tanh(oL * mvol);
       oR = std::tanh(oR * mvol);
@@ -247,7 +304,7 @@ namespace otto {
       scope[sw % kScope].store(0.5f * (oL + oR), std::memory_order_relaxed);
       scope_w.store(sw + 1, std::memory_order_relaxed);
     }
-    tape_pos = pos;
+    tape_pos = size_t(tpos);
     step = last_step;
     peak = pk;
 
@@ -266,7 +323,7 @@ namespace otto {
   {
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::create_directories(dir, ec);
+    fs::create_directories(u8path(dir), ec);
     nlohmann::json j;
     for (auto& p : registry().all) j["params"][p.id] = p.get();
     for (auto& pat : steps) {
@@ -274,7 +331,12 @@ namespace otto {
       for (auto& s : pat) row.push_back(s.load());
       j["steps"].push_back(row);
     }
-    std::ofstream(fs::path(dir) / "project.json") << j.dump(2);
+    for (auto& m : melody) {
+      nlohmann::json row = nlohmann::json::array();
+      for (auto& n : m) row.push_back(n.load());
+      j["melody"].push_back(row);
+    }
+    std::ofstream(u8path(dir) / "project.json") << j.dump(2);
     size_t frames = loop_frames;
     for (size_t t = 0; t < Tape::T; t++) {
       drwav_data_format f{};
@@ -284,8 +346,8 @@ namespace otto {
       f.sampleRate = unsigned(kSR);
       f.bitsPerSample = 32;
       drwav w;
-      auto path = (fs::path(dir) / ("track" + std::to_string(t + 1) + ".wav")).string();
-      if (!drwav_init_file_write(&w, path.c_str(), &f, nullptr)) return false;
+      auto path = u8path(dir) / ("track" + std::to_string(t + 1) + ".wav");
+      if (!drwav_init_file_write_w(&w, path.c_str(), &f, nullptr)) return false;
       drwav_write_pcm_frames(&w, frames, tape.trk[t].data());
       drwav_uninit(&w);
     }
@@ -295,7 +357,7 @@ namespace otto {
   bool Studio::export_mix(const std::string& path)
   {
     std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    std::filesystem::create_directories(u8path(path).parent_path(), ec);
     size_t frames = loop_frames;
     std::vector<float> mix(frames * 2, 0.f);
     for (size_t t = 0; t < Tape::T; t++) {
@@ -312,7 +374,7 @@ namespace otto {
     f.sampleRate = unsigned(kSR);
     f.bitsPerSample = 32;
     drwav w;
-    if (!drwav_init_file_write(&w, path.c_str(), &f, nullptr)) return false;
+    if (!drwav_init_file_write_w(&w, u8path(path).c_str(), &f, nullptr)) return false;
     drwav_write_pcm_frames(&w, frames, mix.data());
     drwav_uninit(&w);
     return true;
@@ -321,7 +383,7 @@ namespace otto {
   bool Studio::load(const std::string& dir)
   {
     namespace fs = std::filesystem;
-    std::ifstream in(fs::path(dir) / "project.json");
+    std::ifstream in(u8path(dir) / "project.json");
     if (!in) return false;
     nlohmann::json j = nlohmann::json::parse(in, nullptr, false);
     if (j.is_discarded()) return false;
@@ -331,6 +393,11 @@ namespace otto {
       if (auto* p = registry().find(id); p && v.is_number()) p->set(v.get<float>());
     for (auto& pat : steps)
       for (auto& s : pat) s = 0;
+    for (auto& m : melody)
+      for (auto& n : m) n = -1;
+    if (j.contains("melody") && j["melody"].is_array())
+      for (size_t m = 0; m < melody.size() && m < j["melody"].size(); m++)
+        for (size_t i = 0; i < 16 && i < j["melody"][m].size(); i++) melody[m][i] = j["melody"][m][i].get<int>();
     if (j.contains("steps") && j["steps"].is_array())
       for (size_t m = 0; m < steps.size() && m < j["steps"].size(); m++) {
         auto& row = j["steps"][m];
@@ -338,10 +405,10 @@ namespace otto {
         for (size_t i = 0; i < steps[m].size() && i < row.size(); i++) steps[m][i] = row[i].get<uint16_t>();
       }
     for (size_t t = 0; t < Tape::T; t++) {
-      auto path = (fs::path(dir) / ("track" + std::to_string(t + 1) + ".wav")).string();
+      auto path = u8path(dir) / ("track" + std::to_string(t + 1) + ".wav");
       unsigned ch = 0, sr = 0;
       drwav_uint64 n = 0;
-      float* d = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &ch, &sr, &n, nullptr);
+      float* d = drwav_open_file_and_read_pcm_frames_f32_w(path.c_str(), &ch, &sr, &n, nullptr);
       std::fill(tape.trk[t].begin(), tape.trk[t].end(), 0.f);
       if (!d) continue;
       n = std::min<drwav_uint64>(n, Tape::kMaxFrames);

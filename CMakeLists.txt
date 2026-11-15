@@ -32,7 +32,7 @@ if(MSVC)
 endif()
 
 # ---- core: engines, fx, sequencer, tape (no audio/midi/ui deps -> testable)
-add_library(otto_core STATIC src/engines.cpp src/drums.cpp src/fx.cpp src/studio.cpp src/dr_wav.c)
+add_library(otto_core STATIC src/engines.cpp src/drums.cpp src/fx.cpp src/studio.cpp src/audio_file.cpp src/dr_wav.c)
 target_include_directories(otto_core PUBLIC src ${drlibs_SOURCE_DIR} ${json_SOURCE_DIR}/include)
 target_link_libraries(otto_core PUBLIC gamma)
 if(MSVC)
@@ -41,7 +41,7 @@ endif()
 
 # ---- app
 add_executable(otto-op1
-  src/main.cpp src/midi.cpp
+  src/main.cpp src/midi.cpp src/filedialog.cpp
   ${rtaudio_SOURCE_DIR}/RtAudio.cpp
   ${rtaudio_SOURCE_DIR}/include/asio.cpp
   ${rtaudio_SOURCE_DIR}/include/asiodrivers.cpp
@@ -54,7 +54,7 @@ add_executable(otto-op1
 target_include_directories(otto-op1 PRIVATE ${rtaudio_SOURCE_DIR} ${rtaudio_SOURCE_DIR}/include ${rtmidi_SOURCE_DIR}
   ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_compile_definitions(otto-op1 PRIVATE __WINDOWS_WASAPI__ __WINDOWS_DS__ __WINDOWS_ASIO__ __WINDOWS_MM__ NOMINMAX)
-target_link_libraries(otto-op1 PRIVATE otto_core glfw opengl32 winmm ole32 ksuser mfplat mfuuid wmcodecdspuuid dsound)
+target_link_libraries(otto-op1 PRIVATE otto_core glfw opengl32 comdlg32 winmm ole32 ksuser mfplat mfuuid wmcodecdspuuid dsound)
 if(MSVC)
   target_compile_options(otto-op1 PRIVATE /utf-8 /fp:fast)
 endif()
