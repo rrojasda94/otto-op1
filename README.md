@@ -34,8 +34,39 @@ DSP portada de [OTTO](https://github.com/bitfieldaudio/OTTO) (Bitfield Audio).
   - Osciloscopio, pads que se iluminan y teclado en pantalla.
 - `otto-op1.exe --shot ui.bmp [motor] [pagina]` guarda una captura de la ventana y cierra. Sirve para revisar la interfaz.
 
+## Instalar
+
+Descarga la última versión desde **[Releases](https://github.com/rrojasda94/otto-op1/releases/latest)**.
+
+### Mac (Apple Silicon o Intel, macOS 11 o superior)
+1. Descarga `otto-op1-macos.zip` y descomprímelo.
+2. Arrastra **otto-op1.app** a la carpeta *Aplicaciones*.
+3. La app no está firmada por Apple, así que la primera vez macOS la bloquea. Para permitirla:
+   - **macOS 15 o superior:** intenta abrirla, cierra el aviso y ve a *Ajustes del Sistema → Privacidad y seguridad*. Ahí pulsa **Abrir igualmente**.
+   - **macOS 14 o anterior:** haz clic derecho sobre la app → **Abrir** → **Abrir**.
+   - **Desde la Terminal**, en cualquier versión:
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/otto-op1.app
+     ```
+4. Tu configuración, presets, proyectos y samples se guardan en `~/Library/Application Support/otto-op1`.
+
+### Windows
+Descarga `otto-op1-windows.zip`, descomprímelo y abre `otto-op1.exe`. La configuración se guarda en la misma carpeta.
+
+## Controladores y remapeo
+- Al abrir la app por primera vez, se elige sola el perfil del controlador que esté conectado:
+  - **Arturia MiniLab 3**
+  - **Novation Launchkey Mini** (MK3 o MK4): perillas CC 21-28, pads en modo *Drum* y Play/Rec.
+
+  Si no reconoce ningún controlador, usa el de MiniLab 3. Los perfiles están en `profiles/*.json`. Para agregar otro controlador, crea un perfil nuevo con su `port_match`.
+- En la pestaña **CONTROLES** puedes reasignar cualquier perilla, fader, botón o pad:
+  - **Asignar uno nuevo:** elige el destino y pulsa **APRENDER**, luego mueve el control.
+  - **Editar la tabla:** puedes cambiar el canal, el CC o la nota, el destino y si el encoder es relativo, o quitar la fila.
+  - **Cambiar de controlador:** elige otro perfil.
+- Todo se guarda solo y queda como configuración por defecto (`mapping.json`).
+
 ## Compilar
-Necesitas CMake y Visual Studio Build Tools (2022 o 2026) con C++. Las dependencias se bajan solas.
+Windows: CMake y Visual Studio Build Tools (2022 o 2026) con C++. Mac: CMake y Xcode Command Line Tools (`cmake -S . -B build && cmake --build build`). Las dependencias se bajan solas. GitHub Actions compila las dos versiones en cada PR y publica una Release al crear un tag `v*`.
 ```bash
 cmake -S . -B build -G "Visual Studio 18 2026" -A x64
 cmake --build build --config Release

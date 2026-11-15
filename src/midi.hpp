@@ -21,9 +21,20 @@ namespace otto {
     explicit Midi(Studio& s);
     ~Midi();
     void open_all();
+    /// user mapping file; remembers the path for save() even when the file does not exist yet
     bool load(const std::string& path);
     bool save();
+    /// add bindings from a profile for CC/note numbers the user has not bound
     void merge_defaults(const std::string& path);
+    /// replace all bindings with a controller profile and save it as the user's default
+    bool apply_profile(const std::string& path);
+    /// profile file whose "port_match" appears in a connected port name ("" if none)
+    std::string detect_profile(const std::filesystem::path& dir);
+    /// profile file whose "profile" name matches (for merging defaults)
+    static std::string find_profile(const std::filesystem::path& dir, const std::string& name);
+
+    std::string profile;          // name of the controller profile the mapping came from
+    std::atomic<bool> dirty{false}; // set on learn / edit; the UI saves
 
     std::mutex mtx; // guards everything below + Studio::midi_q producer side
     std::vector<std::string> ports;
@@ -41,6 +52,7 @@ namespace otto {
     std::vector<std::unique_ptr<RtMidiIn>> ins;
     std::string path_;
     void push_log(std::string s);
+    bool parse(const std::string& file); // fills bindings (caller holds no lock)
   };
 
 } // namespace otto
