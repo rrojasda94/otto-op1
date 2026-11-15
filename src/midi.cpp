@@ -3,6 +3,7 @@
 #include <RtMidi.h>
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -100,6 +101,7 @@ namespace otto {
         std::erase_if(notes, [&](auto& b) { return match(b, d1); });
         notes.push_back({ch, d1, learn});
         push_log("Aprendido: nota " + std::to_string(d1) + " -> " + learn);
+        dirty = true;
         learn.clear();
         return;
       }
@@ -117,6 +119,7 @@ namespace otto {
         std::erase_if(cc, [&](auto& b) { return match(b, d1); });
         cc.push_back({ch, d1, learn});
         push_log("Aprendido: CC " + std::to_string(d1) + " -> " + learn);
+        dirty = true;
         learn.clear();
         return;
       }
@@ -156,14 +159,14 @@ namespace otto {
     }
   }
 
-  bool Midi::load(const std::string& path)
+  bool Midi::parse(const std::string& file)
   {
-    path_ = path;
-    std::ifstream in(u8path(path));
+    std::ifstream in(u8path(file));
     if (!in) return false;
     auto j = nlohmann::json::parse(in, nullptr, false);
     if (j.is_discarded()) return false;
     std::lock_guard lk(mtx);
+    profile = j.value("profile", std::string("Arturia MiniLab 3"));
     drum_ch = j.value("drum_channel", 10);
     drum_base = j.value("drum_base_note", 36);
     cc.clear();
@@ -173,9 +176,64 @@ namespace otto {
     return true;
   }
 
+  bool Midi::load(const std::string& path)
+  {
+    path_ = path;
+    return parse(path);
+  }
+
+  bool Midi::apply_profile(const std::string& file)
+  {
+    if (!parse(file)) return false;
+    push_log("Perfil cargado: " + profile);
+    return save();
+  }
+
+  static std::string lower(std::string s)
+  {
+    for (auto& c : s) c = char(std::tolower((unsigned char)c));
+    return s;
+  }
+
+  std::string Midi::detect_profile(const std::filesystem::path& dir)
+  {
+    std::vector<std::string> names;
+    {
+      std::lock_guard lk(mtx);
+      names = ports;
+    }
+    std::error_code ec;
+    for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+      std::ifstream in(e.path());
+      auto j = nlohmann::json::parse(in, nullptr, false);
+      if (j.is_discarded()) continue;
+      auto m = lower(j.value("port_match", std::string{}));
+      for (auto& n : names)
+        if (!m.empty() && lower(n).find(m) != std::string::npos) {
+          auto u = e.path().u8string();
+          return std::string(u.begin(), u.end());
+        }
+    }
+    return {};
+  }
+
+  std::string Midi::find_profile(const std::filesystem::path& dir, const std::string& name)
+  {
+    std::error_code ec;
+    for (auto& e : std::filesystem::directory_iterator(dir, ec)) {
+      std::ifstream in(e.path());
+      auto j = nlohmann::json::parse(in, nullptr, false);
+      if (!j.is_discarded() && j.value("profile", std::string{}) == name) {
+        auto u = e.path().u8string();
+        return std::string(u.begin(), u.end());
+      }
+    }
+    return {};
+  }
+
   void Midi::merge_defaults(const std::string& path)
   {
-    std::ifstream in(path);
+    std::ifstream in(u8path(path));
     auto j = nlohmann::json::parse(in, nullptr, false);
     if (!in || j.is_discarded()) return;
     std::lock_guard lk(mtx);
@@ -196,13 +254,14 @@ namespace otto {
   {
     std::lock_guard lk(mtx);
     nlohmann::json j;
+    j["profile"] = profile;
     j["drum_channel"] = drum_ch;
     j["drum_base_note"] = drum_base;
     j["cc"] = nlohmann::json::array();
     j["notes"] = nlohmann::json::array();
     for (auto& b : cc) j["cc"].push_back({{"ch", b.ch}, {"cc", b.num}, {"target", b.target}, {"relative", b.relative}});
     for (auto& b : notes) j["notes"].push_back({{"ch", b.ch}, {"note", b.num}, {"target", b.target}});
-    std::ofstream out(path_);
+    std::ofstream out(u8path(path_));
     out << j.dump(2);
     return bool(out);
   }

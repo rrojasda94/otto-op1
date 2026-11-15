@@ -1,6 +1,7 @@
 // otto-op1: OP-1 style groovebox for Windows, controlled by an Arturia MiniLab 3.
 #include "core.hpp"
 #include "midi.hpp"
+#include "platform.hpp"
 
 #include <Gamma/Domain.h>
 #include <GLFW/glfw3.h>
@@ -11,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -18,7 +20,9 @@
 using namespace otto;
 namespace fs = std::filesystem;
 
-std::string open_audio_dialog(); // filedialog.cpp
+#ifndef GL_BGR_EXT
+#define GL_BGR_EXT 0x80E0
+#endif
 
 static std::string utf8(const fs::path& p)
 {
@@ -397,7 +401,8 @@ struct UI {
   Studio& st;
   Midi& midi;
   Audio& audio;
-  fs::path base;
+  fs::path base;      // user data dir (presets, projects, samples, mappings)
+  fs::path resources; // read-only defaults (controller profiles)
   int octave = 48;
   int mouse_note = -1;
   std::array<uint32_t, 8> last_hits{};
@@ -1042,6 +1047,154 @@ static void tab_io(UI& u)
   ImGui::EndChild();
 }
 
+// ---------------------------------------------------------------- CONTROLES: remap everything
+static const char* kActions[] = {"play",        "stop",        "rec",         "clear",       "page_next",   "page_prev",
+                                 "synth_next",  "arp",         "track1",      "track2",      "track3",      "track4",
+                                 "tapestop",    "reverse",     "note_rec",    "preset_next", "preset_prev", "sample_zoom",
+                                 "sample_next", "sample_prev"};
+
+struct Target {
+  std::string id, label;
+};
+
+static const std::vector<Target>& targets()
+{
+  static std::vector<Target> t;
+  if (t.empty()) {
+    for (int k = 1; k <= 4; k++) t.push_back({"enc" + std::to_string(k), "Perilla " + std::to_string(k) + " de la pagina actual"});
+    for (auto* a : kActions) t.push_back({std::string("action:") + a, std::string("Accion: ") + a});
+    for (auto& p : registry().all) t.push_back({p.id, p.name + "  (" + p.id + ")"});
+  }
+  return t;
+}
+
+static std::string target_label(const std::string& id)
+{
+  for (auto& t : targets())
+    if (t.id == id) return t.label;
+  return id;
+}
+
+/// combo with a text filter; returns true when `id` changed
+static bool target_combo(const char* label, std::string& id, float width)
+{
+  static char filter[64] = "";
+  bool changed = false;
+  ImGui::SetNextItemWidth(width);
+  if (ImGui::BeginCombo(label, target_label(id).c_str(), ImGuiComboFlags_HeightLarge)) {
+    if (ImGui::IsWindowAppearing()) {
+      filter[0] = 0;
+      ImGui::SetKeyboardFocusHere();
+    }
+    ImGui::InputTextWithHint("##f", "buscar...", filter, sizeof filter);
+    std::string f = filter;
+    for (auto& c : f) c = char(std::tolower((unsigned char)c));
+    for (auto& t : targets()) {
+      std::string l = t.label;
+      for (auto& c : l) c = char(std::tolower((unsigned char)c));
+      if (!f.empty() && l.find(f) == std::string::npos) continue;
+      if (ImGui::Selectable(t.label.c_str(), t.id == id)) {
+        id = t.id;
+        changed = true;
+      }
+    }
+    ImGui::EndCombo();
+  }
+  return changed;
+}
+
+static void tab_controls(UI& u)
+{
+  auto& midi = u.midi;
+  static std::string new_target = "enc1";
+  static std::vector<std::pair<std::string, std::string>> profiles; // (name, file)
+  if (profiles.empty()) {
+    std::error_code ec;
+    for (auto& e : fs::directory_iterator(u.resources / "profiles", ec)) {
+      std::ifstream in(e.path());
+      auto j = nlohmann::json::parse(in, nullptr, false);
+      if (!j.is_discarded()) profiles.push_back({j.value("profile", utf8(e.path().stem())), utf8(e.path())});
+    }
+  }
+
+  ImGui::TextColored(ImColor(kEnc[0]), "CONTROLADOR");
+  ImGui::SameLine();
+  ImGui::TextDisabled("perfil actual: %s", midi.profile.c_str());
+  for (auto& [name, file] : profiles) {
+    ImGui::SameLine();
+    if (pill(name.c_str(), name == midi.profile, kEnc[0])) u.status = midi.apply_profile(file) ? "Perfil cargado: " + name : "No se pudo cargar el perfil";
+  }
+  ImGui::TextDisabled("Los cambios se guardan solos y quedan como configuracion por defecto. Elegir un perfil reemplaza todas las asignaciones.");
+
+  ImGui::Separator();
+  ImGui::TextColored(ImColor(kEnc[1]), "ASIGNAR");
+  ImGui::SameLine();
+  target_combo("##newt", new_target, 360);
+  ImGui::SameLine();
+  bool waiting;
+  {
+    std::lock_guard lk(midi.mtx);
+    waiting = !midi.learn.empty();
+  }
+  if (pill(waiting ? "MUEVE UN CONTROL..." : "APRENDER", waiting, IM_COL32(220, 130, 0, 255), {190, 0})) {
+    std::lock_guard lk(midi.mtx);
+    midi.learn = waiting ? "" : new_target;
+  }
+  ImGui::SameLine();
+  ImGui::TextDisabled("perillas/faders = CC; botones y pads pueden ser CC o nota (solo acciones)");
+
+  std::lock_guard lk(midi.mtx);
+  bool changed = false;
+  ImGui::SetNextItemWidth(90);
+  changed |= ImGui::DragInt("Canal pads", &midi.drum_ch, 0.1f, 1, 16);
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(90);
+  changed |= ImGui::DragInt("Nota del pad 1", &midi.drum_base, 0.2f, 0, 120);
+  ImGui::SameLine();
+  ImGui::TextDisabled("(los 8 pads de batería usan notas consecutivas desde esa)");
+
+  auto table = [&](const char* id, std::vector<Binding>& v, bool is_cc) {
+    if (!ImGui::BeginTable(id, is_cc ? 5 : 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) return;
+    ImGui::TableSetupColumn("Canal (0=todos)");
+    ImGui::TableSetupColumn(is_cc ? "CC" : "Nota");
+    ImGui::TableSetupColumn("Destino", ImGuiTableColumnFlags_WidthStretch);
+    if (is_cc) ImGui::TableSetupColumn("Relativo");
+    ImGui::TableSetupColumn("");
+    ImGui::TableHeadersRow();
+    int remove = -1;
+    for (int i = 0; i < int(v.size()); i++) {
+      auto& b = v[size_t(i)];
+      ImGui::PushID(i);
+      ImGui::TableNextRow();
+      ImGui::TableNextColumn();
+      ImGui::SetNextItemWidth(70);
+      changed |= ImGui::DragInt("##ch", &b.ch, 0.1f, 0, 16);
+      ImGui::TableNextColumn();
+      ImGui::SetNextItemWidth(70);
+      changed |= ImGui::DragInt("##n", &b.num, 0.2f, 0, 127);
+      ImGui::TableNextColumn();
+      changed |= target_combo("##t", b.target, -1);
+      if (is_cc) {
+        ImGui::TableNextColumn();
+        changed |= ImGui::Checkbox("##rel", &b.relative);
+      }
+      ImGui::TableNextColumn();
+      if (ImGui::SmallButton("quitar")) remove = i;
+      ImGui::PopID();
+    }
+    ImGui::EndTable();
+    if (remove >= 0) {
+      v.erase(v.begin() + remove);
+      changed = true;
+    }
+  };
+  ImGui::TextColored(ImColor(kEnc[2]), "PERILLAS, FADERS Y BOTONES (CC)");
+  table("cc", midi.cc, true);
+  ImGui::TextColored(ImColor(kEnc[3]), "PADS / NOTAS CON ACCION");
+  table("notes", midi.notes, false);
+  if (changed) midi.dirty = true;
+}
+
 // ---------------------------------------------------------------- main
 static UI* g_ui = nullptr;
 
@@ -1075,30 +1228,46 @@ static void save_bmp(const char* path, int w, int h)
 
 int main(int argc, char** argv)
 {
-  fs::path base = fs::absolute(argv[0]).parent_path();
+  AppPaths paths = app_paths(fs::absolute(argv[0]).parent_path());
+  fs::path base = paths.data;
   const char* shot = (argc > 2 && std::string(argv[1]) == "--shot") ? argv[2] : nullptr;
 
   gam::sampleRate(kSR);
   auto st = std::make_unique<Studio>();
-  st->drums.load_dir((base / "samples").string());
+  st->drums.load_dir(utf8(base / "samples"));
   if (fs::exists(base / "samples" / "sampler.wav")) st->load_sampler(utf8(base / "samples" / "sampler.wav"));
 
   Midi midi(*st);
   g_midi = &midi;
-  // user mapping (learned controls) + any new default bindings it does not have yet
-  if (!midi.load(utf8(base / "mapping.json"))) midi.load(utf8(base / "mapping.default.json")), midi.save();
-  midi.merge_defaults(utf8(base / "mapping.default.json"));
-  midi.open_all();
+  midi.open_all(); // first, so the connected controller can pick its profile
+  fs::path profiles = paths.resources / "profiles";
+  if (!midi.load(utf8(base / "mapping.json"))) {
+    // first run: profile of the connected controller (MiniLab 3 if none matches), saved as the user's default
+    auto p = midi.detect_profile(profiles);
+    if (p.empty()) p = utf8(profiles / "minilab3.json");
+    midi.apply_profile(p);
+  } else if (auto p = Midi::find_profile(profiles, midi.profile); !p.empty()) {
+    midi.merge_defaults(p); // new default bindings of the same controller, learned ones kept
+  }
 
   Audio audio;
   audio.st = st.get();
-  audio.start((base / "audio.json").string());
+  audio.start(utf8(base / "audio.json"));
   std::printf("audio: %s [%s]\n", audio.status.c_str(), RtAudio::getApiName(audio.apis[size_t(audio.api_i)]).c_str());
   std::fflush(stdout);
 
   if (!glfwInit()) return 1;
+#ifdef __APPLE__
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+  glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+  glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+  glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+  const char* glsl = "#version 150";
+#else
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
   glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+  const char* glsl = "#version 130";
+#endif
   GLFWwindow* win = glfwCreateWindow(1440, 920, "otto-op1", nullptr, nullptr);
   if (!win) return 1;
   glfwMakeContextCurrent(win);
@@ -1106,11 +1275,17 @@ int main(int argc, char** argv)
   ImGui::CreateContext();
   auto& io = ImGui::GetIO();
   io.IniFilename = nullptr;
-  // TE-ish typography (Bahnschrift ships with Windows 10/11); falls back to ImGui default
-  const char* font = "C:\\Windows\\Fonts\\bahnschrift.ttf";
+  // TE-ish typography (Bahnschrift on Windows, DIN Alternate on macOS); falls back to ImGui default.
+  // Retina: rasterize at framebuffer scale and scale back so text stays sharp.
+  int fbw0, fbh0, ww0, wh0;
+  glfwGetFramebufferSize(win, &fbw0, &fbh0);
+  glfwGetWindowSize(win, &ww0, &wh0);
+  float dpi = ww0 > 0 ? std::max(1.f, float(fbw0) / float(ww0)) : 1.f;
+  const char* font = ui_font_path();
   if (fs::exists(font)) {
-    io.Fonts->AddFontFromFileTTF(font, 17.f);
-    g_big = io.Fonts->AddFontFromFileTTF(font, 32.f);
+    io.Fonts->AddFontFromFileTTF(font, 17.f * dpi);
+    g_big = io.Fonts->AddFontFromFileTTF(font, 32.f * dpi);
+    io.FontGlobalScale = 1.f / dpi;
   } else g_big = io.Fonts->AddFontDefault();
 
   ImGui::StyleColorsDark();
@@ -1137,12 +1312,12 @@ int main(int argc, char** argv)
   C[ImGuiCol_Header] = ImVec4(0.16f, 0.16f, 0.19f, 1);
   C[ImGuiCol_CheckMark] = ImGui::ColorConvertU32ToFloat4(kEnc[1]);
   ImGui_ImplGlfw_InitForOpenGL(win, true);
-  ImGui_ImplOpenGL3_Init("#version 130");
+  ImGui_ImplOpenGL3_Init(glsl);
 
-  UI ui{*st, midi, audio, base};
+  UI ui{*st, midi, audio, base, paths.resources};
   g_ui = &ui;
-  std::snprintf(ui.proj, sizeof ui.proj, "%s", (base / "proyectos" / "proyecto1").string().c_str());
-  std::snprintf(ui.wav, sizeof ui.wav, "%s", (base / "samples" / "sampler.wav").string().c_str());
+  std::snprintf(ui.proj, sizeof ui.proj, "%s", utf8(base / "proyectos" / "proyecto1").c_str());
+  std::snprintf(ui.wav, sizeof ui.wav, "%s", utf8(base / "samples" / "sampler.wav").c_str());
   // drag & drop a .wav onto the window -> sampler
   glfwSetDropCallback(win, [](GLFWwindow* w, int n, const char** paths) {
     if (n < 1 || !g_ui) return;
@@ -1190,8 +1365,9 @@ int main(int argc, char** argv)
         if (ImGui::IsKeyPressed(ImGuiKey(ImGuiKey_1 + i), false)) { st->synth_sel->set(float(i)); st->page = 0; }
     }
 
-    int w, h;
-    glfwGetFramebufferSize(win, &w, &h);
+    int w, h, fw, fh;
+    glfwGetWindowSize(win, &w, &h);
+    glfwGetFramebufferSize(win, &fw, &fh);
     ImGui::SetNextWindowPos({0, 0});
     ImGui::SetNextWindowSize({float(w), float(h)});
     ImGui::Begin("main", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBringToFrontOnFocus);
@@ -1211,6 +1387,7 @@ int main(int argc, char** argv)
       i = i >= n ? 0 : ((i + nav) % n + n) % n;
       ui.status = st->load_sampler(pool[size_t(i)]) ? "Sample: " + utf8(u8path(pool[size_t(i)]).filename()) : "No se pudo leer el audio";
     }
+    if (midi.dirty.exchange(false)) midi.save(); // remaps / learned controls become the default config
     header(ui);
     screen(ui, std::clamp(float(h) * 0.30f, 220.f, 320.f));
     ImGui::Spacing();
@@ -1229,6 +1406,9 @@ int main(int argc, char** argv)
       if (ImGui::BeginTabItem("FX")) { tab_fx(ui); ImGui::EndTabItem(); }
       if (ImGui::BeginTabItem("CINTA")) { tab_tape(ui); ImGui::EndTabItem(); }
       if (ImGui::BeginTabItem("MOTOR")) { tab_engine(ui); ImGui::EndTabItem(); }
+      // --shot <file> <engine> <page> controles : open this tab for the capture
+      bool force = shot && argc > 5 && std::string(argv[5]) == "controles" && ui.time < 1.f;
+      if (ImGui::BeginTabItem("CONTROLES", nullptr, force ? ImGuiTabItemFlags_SetSelected : 0)) { tab_controls(ui); ImGui::EndTabItem(); }
       if (ImGui::BeginTabItem("AUDIO / MIDI")) { tab_io(ui); ImGui::EndTabItem(); }
       ImGui::EndTabBar();
     }
@@ -1236,12 +1416,12 @@ int main(int argc, char** argv)
 
     ImGui::End();
     ImGui::Render();
-    glViewport(0, 0, w, h);
+    glViewport(0, 0, fw, fh);
     glClearColor(0.067f, 0.067f, 0.078f, 1);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     if (shot && ui.time > 3.f) {
-      save_bmp(shot, w, h);
+      save_bmp(shot, fw, fh);
       glfwSetWindowShouldClose(win, 1);
     }
     glfwSwapBuffers(win);

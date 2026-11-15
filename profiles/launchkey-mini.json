@@ -1,0 +1,116 @@
+{
+  "profile": "Novation Launchkey Mini",
+  "port_match": "launchkey",
+  "_comment": "Novation Launchkey Mini MK3/MK4 (valores de fabrica: perillas CC 21-28, pads en modo Drum canal 10, Play CC 115, Rec CC 117). No tiene faders. Si algo no responde: pestaña CONTROLES -> Aprender.",
+  "drum_channel": 10,
+  "drum_base_note": 36,
+  "cc": [
+    {
+      "ch": 0,
+      "cc": 21,
+      "target": "enc1"
+    },
+    {
+      "ch": 0,
+      "cc": 22,
+      "target": "enc2"
+    },
+    {
+      "ch": 0,
+      "cc": 23,
+      "target": "enc3"
+    },
+    {
+      "ch": 0,
+      "cc": 24,
+      "target": "enc4"
+    },
+    {
+      "ch": 0,
+      "cc": 25,
+      "target": "fx.rev.mix"
+    },
+    {
+      "ch": 0,
+      "cc": 26,
+      "target": "fx.rev.length"
+    },
+    {
+      "ch": 0,
+      "cc": 27,
+      "target": "fx.rev.shape"
+    },
+    {
+      "ch": 0,
+      "cc": 28,
+      "target": "fx.delay.mix"
+    },
+    {
+      "ch": 0,
+      "cc": 1,
+      "target": "studio.mod"
+    },
+    {
+      "ch": 0,
+      "cc": 115,
+      "target": "action:play"
+    },
+    {
+      "ch": 0,
+      "cc": 117,
+      "target": "action:rec"
+    },
+    {
+      "ch": 0,
+      "cc": 104,
+      "target": "action:page_prev"
+    },
+    {
+      "ch": 0,
+      "cc": 105,
+      "target": "action:page_next"
+    }
+  ],
+  "notes": [
+    {
+      "ch": 10,
+      "note": 44,
+      "target": "action:play"
+    },
+    {
+      "ch": 10,
+      "note": 45,
+      "target": "action:rec"
+    },
+    {
+      "ch": 10,
+      "note": 46,
+      "target": "action:track1"
+    },
+    {
+      "ch": 10,
+      "note": 47,
+      "target": "action:track2"
+    },
+    {
+      "ch": 10,
+      "note": 48,
+      "target": "action:track3"
+    },
+    {
+      "ch": 10,
+      "note": 49,
+      "target": "action:track4"
+    },
+    {
+      "ch": 10,
+      "note": 50,
+      "target": "action:sample_zoom"
+    },
+    {
+      "ch": 10,
+      "note": 51,
+      "target": "action:synth_next"
+    }
+  ]
+}

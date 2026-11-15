@@ -11,6 +11,24 @@
 
 namespace otto {
 
+  // dr_wav file access with Unicode paths on both platforms (wide API on Windows)
+  static bool wav_open_write(drwav* w, const std::filesystem::path& p, const drwav_data_format* f)
+  {
+#ifdef _WIN32
+    return drwav_init_file_write_w(w, p.c_str(), f, nullptr);
+#else
+    return drwav_init_file_write(w, p.c_str(), f, nullptr);
+#endif
+  }
+  static float* wav_read(const std::filesystem::path& p, unsigned* ch, unsigned* sr, drwav_uint64* n)
+  {
+#ifdef _WIN32
+    return drwav_open_file_and_read_pcm_frames_f32_w(p.c_str(), ch, sr, n, nullptr);
+#else
+    return drwav_open_file_and_read_pcm_frames_f32(p.c_str(), ch, sr, n, nullptr);
+#endif
+  }
+
   // ---------------- Arp ----------------
   Arp::Arp()
   {
@@ -402,7 +420,7 @@ namespace otto {
       f.bitsPerSample = 32;
       drwav w;
       auto path = u8path(dir) / ("track" + std::to_string(t + 1) + ".wav");
-      if (!drwav_init_file_write_w(&w, path.c_str(), &f, nullptr)) return false;
+      if (!wav_open_write(&w, path, &f)) return false;
       drwav_write_pcm_frames(&w, frames, tape.trk[t].data());
       drwav_uninit(&w);
     }
@@ -429,7 +447,7 @@ namespace otto {
     f.sampleRate = unsigned(kSR);
     f.bitsPerSample = 32;
     drwav w;
-    if (!drwav_init_file_write_w(&w, u8path(path).c_str(), &f, nullptr)) return false;
+    if (!wav_open_write(&w, u8path(path), &f)) return false;
     drwav_write_pcm_frames(&w, frames, mix.data());
     drwav_uninit(&w);
     return true;
@@ -471,7 +489,7 @@ namespace otto {
       auto path = u8path(dir) / ("track" + std::to_string(t + 1) + ".wav");
       unsigned ch = 0, sr = 0;
       drwav_uint64 n = 0;
-      float* d = drwav_open_file_and_read_pcm_frames_f32_w(path.c_str(), &ch, &sr, &n, nullptr);
+      float* d = wav_read(path, &ch, &sr, &n);
       std::fill(tape.trk[t].begin(), tape.trk[t].end(), 0.f);
       if (!d) continue;
       n = std::min<drwav_uint64>(n, Tape::kMaxFrames);

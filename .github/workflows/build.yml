@@ -1,0 +1,68 @@
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (universal arm64 + x86_64)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release -j 4
+      - name: DSP check
+        run: ./build/dsp_check
+      - name: Package .app
+        run: |
+          # ad-hoc signature so Apple Silicon runs the binary (not notarized)
+          codesign --force --deep -s - build/otto-op1.app
+          lipo -info build/otto-op1.app/Contents/MacOS/otto-op1
+          ditto -c -k --keepParent build/otto-op1.app otto-op1-macos.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: otto-op1-macos
+          path: otto-op1-macos.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release -- /m
+      - name: DSP check
+        run: build/Release/dsp_check.exe
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory pkg/otto-op1 | Out-Null
+          Copy-Item build/Release/otto-op1.exe pkg/otto-op1/
+          Copy-Item -Recurse build/Release/profiles pkg/otto-op1/
+          Compress-Archive pkg/otto-op1 otto-op1-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: otto-op1-windows
+          path: otto-op1-windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            otto-op1-macos.zip
+            otto-op1-windows.zip

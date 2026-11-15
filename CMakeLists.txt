@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
-project(otto_op1 C CXX)
+if(APPLE)
+  set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
+  set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "") # universal: Apple Silicon + Intel
+endif()
+project(otto_op1 VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -29,6 +33,8 @@ target_include_directories(gamma PUBLIC ${gamma_SOURCE_DIR})
 target_compile_definitions(gamma PUBLIC _USE_MATH_DEFINES NOMINMAX)
 if(MSVC)
   target_compile_options(gamma PRIVATE /W0)
+else()
+  target_compile_options(gamma PRIVATE -w)
 endif()
 
 # ---- core: engines, fx, sequencer, tape (no audio/midi/ui deps -> testable)
@@ -40,27 +46,47 @@ if(MSVC)
 endif()
 
 # ---- app
-add_executable(otto-op1
-  src/main.cpp src/midi.cpp src/filedialog.cpp
+set(APP_SOURCES
+  src/main.cpp src/midi.cpp src/platform.cpp
   ${rtaudio_SOURCE_DIR}/RtAudio.cpp
-  ${rtaudio_SOURCE_DIR}/include/asio.cpp
-  ${rtaudio_SOURCE_DIR}/include/asiodrivers.cpp
-  ${rtaudio_SOURCE_DIR}/include/asiolist.cpp
-  ${rtaudio_SOURCE_DIR}/include/iasiothiscallresolver.cpp
   ${rtmidi_SOURCE_DIR}/RtMidi.cpp
   ${imgui_SOURCE_DIR}/imgui.cpp ${imgui_SOURCE_DIR}/imgui_draw.cpp ${imgui_SOURCE_DIR}/imgui_tables.cpp
   ${imgui_SOURCE_DIR}/imgui_widgets.cpp
   ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp)
+file(GLOB PROFILES ${CMAKE_SOURCE_DIR}/profiles/*.json)
+
+if(WIN32)
+  add_executable(otto-op1 ${APP_SOURCES}
+    ${rtaudio_SOURCE_DIR}/include/asio.cpp ${rtaudio_SOURCE_DIR}/include/asiodrivers.cpp
+    ${rtaudio_SOURCE_DIR}/include/asiolist.cpp ${rtaudio_SOURCE_DIR}/include/iasiothiscallresolver.cpp)
+  target_compile_definitions(otto-op1 PRIVATE __WINDOWS_WASAPI__ __WINDOWS_DS__ __WINDOWS_ASIO__ __WINDOWS_MM__ NOMINMAX)
+  target_link_libraries(otto-op1 PRIVATE otto_core glfw opengl32 comdlg32 winmm ole32 ksuser mfplat mfuuid wmcodecdspuuid dsound)
+  set(RES_DIR $<TARGET_FILE_DIR:otto-op1>)
+elseif(APPLE)
+  add_executable(otto-op1 MACOSX_BUNDLE ${APP_SOURCES})
+  set_target_properties(otto-op1 PROPERTIES
+    OUTPUT_NAME "otto-op1"
+    MACOSX_BUNDLE_BUNDLE_NAME "otto-op1"
+    MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.rrojasda94.otto-op1"
+    MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+    MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
+  target_compile_definitions(otto-op1 PRIVATE __MACOSX_CORE__ GL_SILENCE_DEPRECATION)
+  target_link_libraries(otto-op1 PRIVATE otto_core glfw
+    "-framework CoreAudio" "-framework CoreMIDI" "-framework CoreFoundation" "-framework AudioToolbox"
+    "-framework CoreServices" "-framework OpenGL" "-framework Cocoa" "-framework IOKit")
+  set(RES_DIR $<TARGET_BUNDLE_CONTENT_DIR:otto-op1>/Resources)
+else()
+  message(FATAL_ERROR "otto-op1 supports Windows and macOS")
+endif()
 target_include_directories(otto-op1 PRIVATE ${rtaudio_SOURCE_DIR} ${rtaudio_SOURCE_DIR}/include ${rtmidi_SOURCE_DIR}
   ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
-target_compile_definitions(otto-op1 PRIVATE __WINDOWS_WASAPI__ __WINDOWS_DS__ __WINDOWS_ASIO__ __WINDOWS_MM__ NOMINMAX)
-target_link_libraries(otto-op1 PRIVATE otto_core glfw opengl32 comdlg32 winmm ole32 ksuser mfplat mfuuid wmcodecdspuuid dsound)
 if(MSVC)
   target_compile_options(otto-op1 PRIVATE /utf-8 /fp:fast)
 endif()
+# controller profiles ship next to the exe (Windows) or in the bundle's Resources (macOS)
 add_custom_command(TARGET otto-op1 POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/mapping.json $<TARGET_FILE_DIR:otto-op1>/mapping.default.json
-  COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:otto-op1>/samples)
+  COMMAND ${CMAKE_COMMAND} -E make_directory ${RES_DIR}/profiles
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${PROFILES} ${RES_DIR}/profiles/)
 
 # ---- one runnable DSP check
 add_executable(dsp_check tests/dsp_check.cpp)

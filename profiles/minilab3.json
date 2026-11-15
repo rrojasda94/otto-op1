@@ -1,5 +1,7 @@
 {
-  "_comment": "Arturia MiniLab 3 (valores de fabrica medidos). Canales 1-16, 0 = cualquiera. Si un control no responde, mira el monitor MIDI y usa 'L' (learn) en la app. relative=true para encoders en modo relativo.",
+  "profile": "Arturia MiniLab 3",
+  "port_match": "minilab",
+  "_comment": "Arturia MiniLab 3 (valores medidos en un equipo real). Canales 1-16, 0 = cualquiera. Si un control no responde, mira el monitor MIDI y usa 'L' (learn) en la app. relative=true para encoders en modo relativo.",
   "drum_channel": 10,
   "drum_base_note": 36,
   "cc": [
