@@ -44,7 +44,13 @@ int main()
   registry().find("fx.delay.mix")->set(0.5f);
   registry().find("tape.bars")->set(1);
   std::vector<float> buf(512);
-  st->ui_q.push({Ev::ToggleRec}); // starts transport, records track 1 (euclid kick plays)
+  // default: no sequence at all -> pressing play alone must not trigger drums
+  st->ui_q.push({Ev::Play});
+  for (int b = 0; b < 20; b++) st->process(buf.data(), 256);
+  for (auto& h : st->pad_hits) assert(h == 0 && "nothing plays by default");
+  st->ui_q.push({Ev::Stop});
+  st->steps[0][0] = 0x1111;          // kick on beats of module 1
+  st->ui_q.push({Ev::ToggleRec});    // starts transport, records track 1
   float peak = 0;
   for (int b = 0; b < int(kSR * 2 / 256); b++) { // 1 bar @120 = 2 s
     st->process(buf.data(), 256);
@@ -60,10 +66,12 @@ int main()
   assert(Euclid::hit(0, 16, 4, 0) && !Euclid::hit(1, 16, 4, 0) && Euclid::hit(4, 16, 4, 0));
 
   // step pattern triggers pads; mix export writes a file
-  st->steps[5] = 0xFFFF; // tom on every 16th
+  st->steps[0][5] = 0xFFFF; // module 1 (selected): tom on every 16th
+  st->steps[1][6] = 0xFFFF; // module 2 not selected: must stay silent
   uint32_t before = st->pad_hits[5];
   for (int b = 0; b < 40; b++) st->process(buf.data(), 256); // ~0.2 s at 120 bpm = 1.6 steps
   assert(st->pad_hits[5] > before && "step sequencer hits pad");
+  assert(st->pad_hits[6] == 0 && "only the selected module's pattern plays");
   auto wav = (std::filesystem::temp_directory_path() / "otto_mix_check.wav").string();
   assert(st->export_mix(wav) && std::filesystem::file_size(wav) > 1000);
   std::filesystem::remove(wav);

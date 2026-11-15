@@ -61,15 +61,15 @@ namespace otto {
   }
 
   // ---------------- Euclid ----------------
-  Euclid::Euclid()
+  Euclid::Euclid(const std::string& prefix)
   {
     auto& R = registry();
-    const int def_hits[C] = {4, 0, 0, 0}, def_pad[C] = {0, 1, 2, 3};
+    const int def_pad[C] = {0, 1, 2, 3};
     for (int i = 0; i < C; i++) {
-      auto id = "euc" + std::to_string(i + 1) + ".";
+      auto id = prefix + "euc" + std::to_string(i + 1) + ".";
       auto nm = "Euclid " + std::to_string(i + 1) + " ";
       ch[size_t(i)].len = &R.add(id + "len", nm + "Largo", 1, 16, 16, 0, true);
-      ch[size_t(i)].hits = &R.add(id + "hits", nm + "Golpes", 0, 16, float(def_hits[i]), 0, true);
+      ch[size_t(i)].hits = &R.add(id + "hits", nm + "Golpes", 0, 16, 0, 0, true); // silent until the user dials hits
       ch[size_t(i)].rot = &R.add(id + "rot", nm + "Rotacion", 0, 15, 0, 0, true);
       ch[size_t(i)].pad = &R.add(id + "pad", nm + "Pad", 0, 7, float(def_pad[i]), 0, true);
     }
@@ -92,6 +92,7 @@ namespace otto {
     synths.push_back(make_string());
     synths.push_back(make_cluster());
     synths.push_back(make_sampler());
+    for (int m = 0; m < kMods; m++) euclids.emplace_back("m" + std::to_string(m + 1) + ".");
     auto& R = registry();
     synth_sel = &R.add("studio.synth", "Motor", 0, float(synths.size() - 1), 0, 0, true);
     bpm = &R.add("studio.bpm", "BPM", 40, 240, 120, 0, true);
@@ -137,7 +138,7 @@ namespace otto {
         if (step_rec && playing && e.a >= 0 && e.a < Drums::N) { // quantize to nearest 16th
           double spb16 = kSR * 60.0 / bpm->get() / 4.0;
           int st = int(std::lround(double(tape_pos.load()) / spb16)) % 16;
-          steps[size_t(e.a)].fetch_or(uint16_t(1u << st));
+          cur_steps()[size_t(e.a)].fetch_or(uint16_t(1u << st));
         }
         break;
       case Ev::Bend: bend = e.b; break;
@@ -208,10 +209,10 @@ namespace otto {
         int st = int(double(pos) / spb16);
         if (st != last_step) {
           last_step = st;
-          for (auto& c : euclid.ch)
+          for (auto& c : cur_euclid().ch)
             if (Euclid::hit(st, c.len->geti(), c.hits->geti(), c.rot->geti())) hit_pad(c.pad->geti(), 0.9f);
           for (int p = 0; p < Drums::N; p++)
-            if ((steps[size_t(p)].load(std::memory_order_relaxed) >> (st % 16)) & 1) hit_pad(p, 0.85f);
+            if ((cur_steps()[size_t(p)].load(std::memory_order_relaxed) >> (st % 16)) & 1) hit_pad(p, 0.85f);
         }
       }
 
@@ -268,7 +269,11 @@ namespace otto {
     fs::create_directories(dir, ec);
     nlohmann::json j;
     for (auto& p : registry().all) j["params"][p.id] = p.get();
-    for (auto& s : steps) j["steps"].push_back(s.load());
+    for (auto& pat : steps) {
+      nlohmann::json row = nlohmann::json::array();
+      for (auto& s : pat) row.push_back(s.load());
+      j["steps"].push_back(row);
+    }
     std::ofstream(fs::path(dir) / "project.json") << j.dump(2);
     size_t frames = loop_frames;
     for (size_t t = 0; t < Tape::T; t++) {
@@ -324,8 +329,14 @@ namespace otto {
     ui_q.push({Ev::Stop});
     for (auto& [id, v] : j["params"].items())
       if (auto* p = registry().find(id); p && v.is_number()) p->set(v.get<float>());
-    if (j.contains("steps"))
-      for (size_t i = 0; i < steps.size() && i < j["steps"].size(); i++) steps[i] = j["steps"][i].get<uint16_t>();
+    for (auto& pat : steps)
+      for (auto& s : pat) s = 0;
+    if (j.contains("steps") && j["steps"].is_array())
+      for (size_t m = 0; m < steps.size() && m < j["steps"].size(); m++) {
+        auto& row = j["steps"][m];
+        if (row.is_number()) { steps[0][m] = row.get<uint16_t>(); continue; } // v2 format: one global pattern
+        for (size_t i = 0; i < steps[m].size() && i < row.size(); i++) steps[m][i] = row[i].get<uint16_t>();
+      }
     for (size_t t = 0; t < Tape::T; t++) {
       auto path = (fs::path(dir) / ("track" + std::to_string(t + 1) + ".wav")).string();
       unsigned ch = 0, sr = 0;
