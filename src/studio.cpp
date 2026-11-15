@@ -89,6 +89,9 @@ namespace otto {
   {
     synths.push_back(make_ottofm());
     synths.push_back(make_nuke());
+    synths.push_back(make_string());
+    synths.push_back(make_cluster());
+    synths.push_back(make_sampler());
     auto& R = registry();
     synth_sel = &R.add("studio.synth", "Motor", 0, float(synths.size() - 1), 0, 0, true);
     bpm = &R.add("studio.bpm", "BPM", 40, 240, 120, 0, true);
@@ -99,19 +102,44 @@ namespace otto {
     rec_track = &R.add("tape.rec", "Pista armada", 0, 3, 0, 0, true);
   }
 
+  void Studio::hit_pad(int pad, float vel)
+  {
+    if (pad < 0 || pad >= Drums::N) return;
+    drums.hit(pad, vel);
+    pad_hits[size_t(pad)].fetch_add(1, std::memory_order_relaxed);
+  }
+
+  void Studio::set_held(int n, bool on)
+  {
+    if (n < 0 || n > 127) return;
+    uint64_t bit = uint64_t(1) << (n & 63);
+    auto& w = held[size_t(n >> 6)];
+    if (on) w.fetch_or(bit, std::memory_order_relaxed);
+    else w.fetch_and(~bit, std::memory_order_relaxed);
+  }
+
   void Studio::handle(const Ev& e)
   {
     bool arp_on = arp.on->geti() != 0;
     switch (e.t) {
       case Ev::NoteOn:
+        set_held(e.a, true);
         if (arp_on) arp.press(e.a);
         else synth().note_on(e.a, e.b);
         break;
       case Ev::NoteOff:
+        set_held(e.a, false);
         if (arp_on) arp.release(e.a);
         else synth().note_off(e.a);
         break;
-      case Ev::Drum: drums.hit(e.a, e.b); break;
+      case Ev::Drum:
+        hit_pad(e.a, e.b);
+        if (step_rec && playing && e.a >= 0 && e.a < Drums::N) { // quantize to nearest 16th
+          double spb16 = kSR * 60.0 / bpm->get() / 4.0;
+          int st = int(std::lround(double(tape_pos.load()) / spb16)) % 16;
+          steps[size_t(e.a)].fetch_or(uint16_t(1u << st));
+        }
+        break;
       case Ev::Bend: bend = e.b; break;
       case Ev::Play: playing = true; break;
       case Ev::TogglePlay: playing = !playing; break;
@@ -181,7 +209,9 @@ namespace otto {
         if (st != last_step) {
           last_step = st;
           for (auto& c : euclid.ch)
-            if (Euclid::hit(st, c.len->geti(), c.hits->geti(), c.rot->geti())) drums.hit(c.pad->geti(), 0.9f);
+            if (Euclid::hit(st, c.len->geti(), c.hits->geti(), c.rot->geti())) hit_pad(c.pad->geti(), 0.9f);
+          for (int p = 0; p < Drums::N; p++)
+            if ((steps[size_t(p)].load(std::memory_order_relaxed) >> (st % 16)) & 1) hit_pad(p, 0.85f);
         }
       }
 
@@ -212,6 +242,9 @@ namespace otto {
       out[2 * i] = oL;
       out[2 * i + 1] = oR;
       pk = std::max(pk, std::abs(oL));
+      uint32_t sw = scope_w.load(std::memory_order_relaxed);
+      scope[sw % kScope].store(0.5f * (oL + oR), std::memory_order_relaxed);
+      scope_w.store(sw + 1, std::memory_order_relaxed);
     }
     tape_pos = pos;
     step = last_step;
@@ -235,6 +268,7 @@ namespace otto {
     fs::create_directories(dir, ec);
     nlohmann::json j;
     for (auto& p : registry().all) j["params"][p.id] = p.get();
+    for (auto& s : steps) j["steps"].push_back(s.load());
     std::ofstream(fs::path(dir) / "project.json") << j.dump(2);
     size_t frames = loop_frames;
     for (size_t t = 0; t < Tape::T; t++) {
@@ -253,6 +287,32 @@ namespace otto {
     return true;
   }
 
+  bool Studio::export_mix(const std::string& path)
+  {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
+    size_t frames = loop_frames;
+    std::vector<float> mix(frames * 2, 0.f);
+    for (size_t t = 0; t < Tape::T; t++) {
+      if (tape.mute[t]) continue;
+      float v = tape.vol[t]->get();
+      for (size_t i = 0; i < frames * 2; i++) mix[i] += tape.trk[t][i] * v;
+    }
+    float m = master->get();
+    for (auto& s : mix) s = std::tanh(s * m);
+    drwav_data_format f{};
+    f.container = drwav_container_riff;
+    f.format = DR_WAVE_FORMAT_IEEE_FLOAT;
+    f.channels = 2;
+    f.sampleRate = unsigned(kSR);
+    f.bitsPerSample = 32;
+    drwav w;
+    if (!drwav_init_file_write(&w, path.c_str(), &f, nullptr)) return false;
+    drwav_write_pcm_frames(&w, frames, mix.data());
+    drwav_uninit(&w);
+    return true;
+  }
+
   bool Studio::load(const std::string& dir)
   {
     namespace fs = std::filesystem;
@@ -264,6 +324,8 @@ namespace otto {
     ui_q.push({Ev::Stop});
     for (auto& [id, v] : j["params"].items())
       if (auto* p = registry().find(id); p && v.is_number()) p->set(v.get<float>());
+    if (j.contains("steps"))
+      for (size_t i = 0; i < steps.size() && i < j["steps"].size(); i++) steps[i] = j["steps"][i].get<uint16_t>();
     for (size_t t = 0; t < Tape::T; t++) {
       auto path = (fs::path(dir) / ("track" + std::to_string(t + 1) + ".wav")).string();
       unsigned ch = 0, sr = 0;

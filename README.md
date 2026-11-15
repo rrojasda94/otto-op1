@@ -4,11 +4,26 @@ Groovebox estilo OP-1 para Windows, controlado con un **Arturia MiniLab 3**.
 DSP portada de [OTTO](https://github.com/bitfieldaudio/OTTO) (Bitfield Audio).
 
 ## Qué tiene
-- **Motores:** OTTO.FM (4 operadores, 11 algoritmos, 6 voces) y NUKE (2 osciladores, filtro ladder, envolvente de filtro y LFO).
+- **Motores** (teclas 1-5):
+  - OTTO.FM (de OTTO): 4 operadores, 11 algoritmos, 6 voces.
+  - NUKE (de OTTO): 2 osciladores, filtro ladder, envolvente de filtro y LFO.
+  - STRING: cuerda pulsada Karplus-Strong.
+  - CLUSTER: 6 osciladores desafinados, sub-octava y filtro ladder.
+  - SAMPLER: cromático, con nota raíz en C4. Para cargar un sonido, arrastra un `.wav` a la ventana o pon `samples/sampler.wav`.
 - **Drums:** 8 pads con un kit sintético. Para cambiar un sonido, pon `samples/pad1.wav` … `pad8.wav` junto al exe.
 - **FX:** chorus, delay ping-pong sincronizado al BPM y reverb Wormhole (con shimmer).
-- **Secuenciadores:** arpegiador (up, down, updown, random y orden de tocado) y Euclid de 4 canales para los pads.
-- **Cinta:** 4 pistas estéreo en loop (de 1 a 16 compases, máximo 64 s) con overdub y faders. Se guarda como `project.json` más un `trackN.wav` por pista.
+- **Secuenciadores:**
+  - Grilla de 16 pasos por pad. Con **REC PATRON** y PLAY activos, lo que tocas en los pads se graba cuantizado a 1/16.
+  - Euclid de 4 canales.
+  - Arpegiador (up, down, updown, random y orden de tocado).
+- **Cinta:** 4 pistas estéreo en loop (de 1 a 16 compases, máximo 64 s) con overdub y faders.
+  - **Guardar** crea `project.json` más un `trackN.wav` por pista.
+  - **Exportar mezcla WAV** crea `mezcla.wav`.
+- **Pantalla estilo OP-1:**
+  - Dibujo propio de cada motor: algoritmo FM, curva del filtro, cuerda vibrando, cluster o forma de onda del sample.
+  - Casete con carretes que giran y forma de onda de cada pista.
+  - Osciloscopio, pads que se iluminan y teclado en pantalla.
+- `otto-op1.exe --shot ui.bmp [motor] [pagina]` guarda una captura de la ventana y cierra. Sirve para revisar la interfaz.
 
 ## Compilar
 Necesitas CMake y Visual Studio Build Tools (2022 o 2026) con C++. Las dependencias se bajan solas.

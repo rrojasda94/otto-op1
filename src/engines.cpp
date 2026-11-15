@@ -4,6 +4,7 @@
 
 #include <Gamma/Envelope.h>
 #include <Gamma/Oscillator.h>
+#include <dr_wav.h>
 
 namespace otto {
 
@@ -466,7 +467,302 @@ namespace otto {
     };
   } // namespace nuke
 
+  // =====================================================================
+  // STRING — Karplus-Strong plucked string (new, not from OTTO)
+  // =====================================================================
+  namespace str {
+    struct Voice {
+      DelayLine dl{2400};
+      float base = 440, prev = 0, energy = 0;
+      bool held = false;
+      uint32_t seed = 12345;
+      bool active() const { return energy > 1e-5f; }
+      float noise()
+      {
+        seed = seed * 1664525u + 1013904223u;
+        return float(int32_t(seed)) / 2147483648.f;
+      }
+      void pluck(float bright, float vel)
+      {
+        OnePole lp;
+        lp.lp(300 + bright * bright * 12000);
+        int n = int(kSR / base) + 2;
+        for (int i = 0; i < n; i++) dl.write(lp(noise()) * vel);
+        energy = 1;
+        held = true;
+      }
+      float operator()(float fb, float damp, float fmul)
+      {
+        float d = std::clamp(kSR / (base * fmul) - 1.f, 2.f, 2390.f);
+        float out = dl.read(d);
+        float f = damp * out + (1 - damp) * prev; // averaging lowpass = string damping
+        prev = out;
+        dl.write(f * (held ? fb : fb * 0.97f));
+        energy = energy * 0.9995f + std::abs(out) * 0.0005f;
+        return out;
+      }
+    };
+
+    struct Engine final : otto::Engine {
+      Param *bright, *sustain, *tone;
+      Poly<Voice, 6> poly;
+      float fb = 0.99f, damp = 0.5f, br = 0.7f;
+      Engine()
+      {
+        title = "STRING";
+        pages = {"CUERDA"};
+        auto& R = registry();
+        bright = &R.add("str.bright", "Brillo", 0, 1, 0.7f, 0);
+        sustain = &R.add("str.sustain", "Sustain", 0, 1, 0.8f, 0);
+        tone = &R.add("str.tone", "Tono", 0, 1, 0.5f, 0);
+        volume = &R.add("str.vol", "Volumen", 0, 1, 0.7f, 0);
+        params = {bright, sustain, tone, volume};
+      }
+      void update() override
+      {
+        fb = 0.98f + 0.0199f * sustain->get();
+        damp = 0.5f + 0.49f * tone->get();
+        br = bright->get();
+      }
+      void note_on(int n, float vel) override { poly.on(n)->pluck(br, 0.4f + 0.6f * vel); }
+      void note_off(int n) override
+      {
+        poly.off(n, [](Voice& v) { v.held = false; });
+      }
+      void all_off() override
+      {
+        for (int i = 0; i < 6; i++)
+          if (poly.note[size_t(i)] >= 0) note_off(poly.note[size_t(i)]);
+      }
+      float process() override
+      {
+        float s = 0;
+        for (auto& v : poly.v)
+          if (v.active()) s += v(fb, damp, freq_mul);
+        return s * 0.6f;
+      }
+    };
+  } // namespace str
+
+  // =====================================================================
+  // CLUSTER — 6 detuned oscillators per voice into ladder filter (new)
+  // =====================================================================
+  namespace cluster {
+    constexpr std::array<float, 6> kOff = {-1.f, -0.6f, -0.25f, 0.25f, 0.6f, 1.f};
+    struct Voice {
+      std::array<float, 6> ph{0, .17f, .33f, .5f, .66f, .83f};
+      float base = 440, sub_ph = 0;
+      gam::ADSR<> env;
+      nuke::MoogLadder filt;
+      Voice() { env.finish(); }
+      bool active() const { return !env.done(); }
+      float operator()(float spread, float shape, float sub, float fmul)
+      {
+        float s = 0;
+        for (size_t k = 0; k < 6; k++) {
+          ph[k] += base * fmul * (1 + spread * 0.03f * kOff[k]) / kSR;
+          if (ph[k] >= 1) ph[k] -= 1;
+          float saw = 2 * ph[k] - 1, pulse = ph[k] < 0.5f ? 1.f : -1.f;
+          s += saw + (pulse - saw) * shape;
+        }
+        sub_ph += base * fmul * 0.5f / kSR;
+        if (sub_ph >= 1) sub_ph -= 1;
+        s = s / 6 + sub * std::sin(2 * kPi * sub_ph);
+        return filt(s) * env();
+      }
+    };
+
+    struct Engine final : otto::Engine {
+      Param *spread, *shape, *cutoff, *res, *sub, *a, *d, *s, *r;
+      Poly<Voice, 6> poly;
+      float sp = 0, sh = 0, sb = 0;
+      Engine()
+      {
+        title = "CLUSTER";
+        pages = {"CLUSTER", "ENV", "FILTRO"};
+        auto& R = registry();
+        spread = &R.add("cl.spread", "Spread", 0, 1, 0.4f, 0);
+        shape = &R.add("cl.shape", "Forma", 0, 1, 0, 0);
+        cutoff = &R.add("cl.cutoff", "Cutoff", 0, 1, 0.6f, 0);
+        volume = &R.add("cl.vol", "Volumen", 0, 1, 0.6f, 0);
+        a = &R.add("cl.a", "Attack", 0, 1, 0.1f, 1);
+        d = &R.add("cl.d", "Decay", 0, 1, 0.3f, 1);
+        s = &R.add("cl.s", "Sustain", 0, 1, 0.7f, 1);
+        r = &R.add("cl.r", "Release", 0, 1, 0.3f, 1);
+        res = &R.add("cl.res", "Resonancia", 0, 1, 0.2f, 2);
+        sub = &R.add("cl.sub", "Sub Oct", 0, 1, 0, 2);
+        params = {spread, shape, cutoff, volume, a, d, s, r, res, sub};
+      }
+      void update() override
+      {
+        sp = spread->get();
+        sh = shape->get();
+        sb = sub->get();
+        float fc = 80.f * std::pow(200.f, cutoff->get());
+        for (auto& v : poly.v) {
+          v.filt.res = 0.1f + 0.6f * res->get();
+          v.filt.setCutoff(std::min(fc, 18000.f));
+          v.env.attack(envelope_stage_duration(a->get()));
+          v.env.decay(envelope_stage_duration(d->get()));
+          v.env.sustain(s->get());
+          v.env.release(envelope_stage_duration(r->get()));
+        }
+      }
+      void note_on(int n, float) override { poly.on(n)->env.resetSoft(); }
+      void note_off(int n) override
+      {
+        poly.off(n, [](Voice& v) { v.env.release(); });
+      }
+      void all_off() override
+      {
+        for (int i = 0; i < 6; i++)
+          if (poly.note[size_t(i)] >= 0) note_off(poly.note[size_t(i)]);
+      }
+      float process() override
+      {
+        float out = 0;
+        for (auto& v : poly.v)
+          if (v.active()) out += v(sp, sh, sb, freq_mul);
+        return out * 0.3f;
+      }
+    };
+  } // namespace cluster
+
+  // =====================================================================
+  // SAMPLER — chromatic sample player, root C4 (new)
+  // =====================================================================
+  namespace smp {
+    struct Voice {
+      double pos = 0;
+      float base = 440;
+      gam::ADSR<> env;
+      Voice() { env.finish(); }
+      bool active() const { return !env.done(); }
+    };
+
+    struct Engine final : otto::Engine {
+      Param *start, *end, *loop, *a, *d, *s, *r, *tune, *fine;
+      Poly<Voice, 6> poly;
+      // double buffer: UI fills the inactive slot, then flips `cur`
+      std::array<std::vector<float>, 2> buf;
+      std::array<float, 2> sr_ratio{1, 1};
+      std::atomic<int> cur{0};
+      std::string name = "(interno)";
+
+      Engine()
+      {
+        title = "SAMPLER";
+        pages = {"SAMPLE", "ENV", "AFINAR"};
+        auto& R = registry();
+        start = &R.add("smp.start", "Inicio", 0, 1, 0, 0);
+        end = &R.add("smp.end", "Fin", 0, 1, 1, 0);
+        loop = &R.add("smp.loop", "Loop", 0, 1, 1, 0, true);
+        volume = &R.add("smp.vol", "Volumen", 0, 1, 0.8f, 0);
+        a = &R.add("smp.a", "Attack", 0, 1, 0.05f, 1);
+        d = &R.add("smp.d", "Decay", 0, 1, 0.3f, 1);
+        s = &R.add("smp.s", "Sustain", 0, 1, 1, 1);
+        r = &R.add("smp.r", "Release", 0, 1, 0.25f, 1);
+        tune = &R.add("smp.tune", "Semitonos", -24, 24, 0, 2, true);
+        fine = &R.add("smp.fine", "Fino", -1, 1, 0, 2);
+        params = {start, end, loop, volume, a, d, s, r, tune, fine};
+        // built-in sample: soft organ "aah" at C4 with vibrato, loopable
+        auto& b = buf[0];
+        b.resize(size_t(kSR * 1.5f));
+        double ph = 0;
+        for (size_t i = 0; i < b.size(); i++) {
+          float t = float(i) / kSR;
+          ph += 261.63 * (1 + 0.004 * std::sin(2 * kPi * 5 * t)) / kSR;
+          float x = 0;
+          for (int h = 1; h <= 8; h++) x += std::sin(float(2 * kPi * ph * h)) / float(h * h) * (h == 3 ? 2.f : 1.f);
+          b[i] = 0.4f * x * std::min(1.f, t * 20);
+        }
+      }
+      const std::vector<float>& data() const { return buf[size_t(cur.load())]; }
+
+      void update() override
+      {
+        for (auto& v : poly.v) {
+          v.env.attack(envelope_stage_duration(a->get()));
+          v.env.decay(envelope_stage_duration(d->get()));
+          v.env.sustain(s->get());
+          v.env.release(envelope_stage_duration(r->get()));
+        }
+      }
+      void note_on(int n, float) override
+      {
+        auto* v = poly.on(n);
+        v->pos = start->get() * double(data().size());
+        v->env.resetSoft();
+      }
+      void note_off(int n) override
+      {
+        poly.off(n, [](Voice& v) { v.env.release(); });
+      }
+      void all_off() override
+      {
+        for (int i = 0; i < 6; i++)
+          if (poly.note[size_t(i)] >= 0) note_off(poly.note[size_t(i)]);
+      }
+      float process() override
+      {
+        const auto& b = data();
+        if (b.size() < 4) return 0;
+        double n = double(b.size());
+        double s0 = start->get() * n, s1 = std::max(s0 + 64, end->get() * n);
+        s1 = std::min(s1, n - 2);
+        bool lp = loop->geti() != 0;
+        float tr = std::pow(2.f, (float(tune->geti()) + fine->get()) / 12.f) * sr_ratio[size_t(cur.load())];
+        float out = 0;
+        for (auto& v : poly.v) {
+          if (!v.active()) continue;
+          if (v.pos >= s1) {
+            if (lp) v.pos = s0 + std::fmod(v.pos - s0, std::max(1.0, s1 - s0));
+            else { v.env.finish(); continue; }
+          }
+          size_t p = size_t(v.pos);
+          if (p + 1 >= b.size()) { v.env.finish(); continue; } // sample swapped under us
+          float f = float(v.pos - double(p));
+          out += (b[p] + (b[p + 1] - b[p]) * f) * v.env();
+          v.pos += double(v.base / 261.63f * tr * freq_mul);
+        }
+        return out * 0.5f;
+      }
+    };
+  } // namespace smp
+
+  bool sampler_load(Engine& e, const std::string& path)
+  {
+    auto* s = dynamic_cast<smp::Engine*>(&e);
+    if (!s) return false;
+    unsigned ch = 0, sr = 0;
+    drwav_uint64 frames = 0;
+    float* d = drwav_open_file_and_read_pcm_frames_f32(path.c_str(), &ch, &sr, &frames, nullptr);
+    if (!d) return false;
+    int slot = 1 - s->cur.load();
+    auto& b = s->buf[size_t(slot)];
+    b.assign(static_cast<size_t>(frames), 0.f);
+    for (size_t f = 0; f < frames; f++) {
+      float x = 0;
+      for (unsigned c = 0; c < ch; c++) x += d[f * ch + c];
+      b[f] = x / float(ch);
+    }
+    drwav_free(d, nullptr);
+    s->sr_ratio[size_t(slot)] = float(sr) / kSR;
+    s->name = path;
+    s->cur.store(slot); // ponytail: voices mid-note jump into the new buffer; bounds-checked, no crash
+    return true;
+  }
+
+  const std::vector<float>* sampler_data(Engine& e)
+  {
+    auto* s = dynamic_cast<smp::Engine*>(&e);
+    return s ? &s->data() : nullptr;
+  }
+
   std::unique_ptr<Engine> make_ottofm() { return std::make_unique<fm::Engine>(); }
   std::unique_ptr<Engine> make_nuke() { return std::make_unique<nuke::Engine>(); }
+  std::unique_ptr<Engine> make_string() { return std::make_unique<str::Engine>(); }
+  std::unique_ptr<Engine> make_cluster() { return std::make_unique<cluster::Engine>(); }
+  std::unique_ptr<Engine> make_sampler() { return std::make_unique<smp::Engine>(); }
 
 } // namespace otto
