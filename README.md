@@ -18,6 +18,9 @@ DSP portada de [OTTO](https://github.com/bitfieldaudio/OTTO) (Bitfield Audio).
   - Arpegiador (up, down, updown, random y orden de tocado).
 - **Secuencia de notas por motor:** 16 pasos. Activa **REC NOTAS** con PLAY y toca el teclado; también puedes hacer clic en las celdas y usar la rueda del mouse para subir o bajar la nota.
 - **Presets por motor:** en la pestaña MOTOR, ponle nombre y pulsa **Guardar preset**. Se guardan en `presets/<MOTOR>/*.json`. Las acciones MIDI `preset_next` y `preset_prev` los recorren.
+- **SAMPLER, corte fino:** el botón **CC 118** del MiniLab, o **ZOOM** en MOTOR, ajusta la vista a Inicio–Fin con un 10 % de margen, y los encoders pasan a recorrer solo esa zona. Si vuelves a pulsar, hace zoom de nuevo sobre la selección. Con doble toque rápido vuelve al sample completo.
+- **SAMPLER, mantener tempo:** activado por defecto (página AFINAR). Las notas cambian la altura pero no la duración, mediante pitch-shift granular. Si lo apagas, vuelve al modo clásico, donde la nota más grave también suena más lenta.
+- **Samples de la sesión:** cada archivo que cargas queda en una lista (pestaña MOTOR y clic derecho en un pad → **Desde la sesion**). La lista se guarda con el proyecto, y al cargarlo se restauran el sampler y los pads. Las acciones MIDI `sample_next` y `sample_prev` la recorren.
 - **Cargar samples:** WAV, MP3 o FLAC, y funciona con rutas con acentos o "ñ".
   - Para cambiar el sonido de un pad: arrástrale un archivo encima o usa clic derecho → **Cargar sample...**.
   - Para el SAMPLER: arrastra el archivo a cualquier otra parte de la ventana o usa **Abrir archivo...** en MOTOR.
@@ -49,6 +52,8 @@ build/Release/otto-op1.exe
 | Faders 1-4 (CC 14,15,30,31) | Volumen de las pistas de cinta 1-4 |
 | Pads banco A (ch10, 36-43) | Drums |
 | Pads banco B (ch10, 44-51) | Play, Rec, armar pista 1-4, página anterior y siguiente |
+
+Tus asignaciones aprendidas se guardan en `mapping.json` y no se pisan al recompilar. Las asignaciones nuevas de fábrica (en `mapping.default.json`) se agregan solas.
 
 Si algo no responde, mira el **monitor MIDI** en la app. El botón **L** junto a cada parámetro activa MIDI learn, y **Learn acción** sirve para los botones. Luego pulsa **Guardar mapeo**.
 Teclado del PC: las teclas A a L son notas, Z/X cambian de octava, espacio es play, R es rec y RePág/AvPág cambian de página.

@@ -15,7 +15,8 @@
     { "ch": 0, "cc": 15, "target": "tape.vol2" },
     { "ch": 0, "cc": 30, "target": "tape.vol3" },
     { "ch": 0, "cc": 31, "target": "tape.vol4" },
-    { "ch": 0, "cc": 1,  "target": "studio.mod" }
+    { "ch": 0, "cc": 1,  "target": "studio.mod" },
+    { "ch": 0, "cc": 118, "target": "action:sample_zoom" }
   ],
   "notes": [
     { "ch": 10, "note": 44, "target": "action:play" },

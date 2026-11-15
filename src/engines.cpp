@@ -632,7 +632,11 @@ namespace otto {
   // =====================================================================
   namespace smp {
     struct Voice {
-      double pos = 0;
+      double pos = 0;                 // classic mode read head
+      double tpos = 0;                // keep-tempo mode: time pointer (advances at 1x)
+      float gph = 0;                  // grain phase 0..1
+      std::array<double, 2> gstart{}; // where each of the 2 overlapping grains started
+      std::array<float, 2> gprev{1, 1};
       float base = 440;
       gam::ADSR<> env;
       Voice() { env.finish(); }
@@ -640,7 +644,7 @@ namespace otto {
     };
 
     struct Engine final : otto::Engine {
-      Param *start, *end, *loop, *a, *d, *s, *r, *tune, *fine;
+      Param *start, *end, *loop, *a, *d, *s, *r, *tune, *fine, *mode;
       Poly<Voice, 6> poly;
       // double buffer: UI fills the inactive slot, then flips `cur`
       std::array<std::vector<float>, 2> buf;
@@ -663,7 +667,8 @@ namespace otto {
         r = &R.add("smp.r", "Release", 0, 1, 0.25f, 1);
         tune = &R.add("smp.tune", "Semitonos", -24, 24, 0, 2, true);
         fine = &R.add("smp.fine", "Fino", -1, 1, 0, 2);
-        params = {start, end, loop, volume, a, d, s, r, tune, fine};
+        mode = &R.add("smp.keep", "Mantener tempo", 0, 1, 1, 2, true);
+        params = {start, end, loop, volume, a, d, s, r, tune, fine, mode};
         // built-in sample: soft organ "aah" at C4 with vibrato, loopable
         auto& b = buf[0];
         b.resize(size_t(kSR * 1.5f));
@@ -690,7 +695,10 @@ namespace otto {
       void note_on(int n, float) override
       {
         auto* v = poly.on(n);
-        v->pos = start->get() * double(data().size());
+        v->pos = v->tpos = start->get() * double(data().size());
+        v->gph = 0;
+        v->gstart = {v->tpos, v->tpos};
+        v->gprev = {1, 1};
         v->env.resetSoft();
       }
       void note_off(int n) override
@@ -710,8 +718,44 @@ namespace otto {
         double s0 = start->get() * n, s1 = std::max(s0 + 64, end->get() * n);
         s1 = std::min(s1, n - 2);
         bool lp = loop->geti() != 0;
-        float tr = std::pow(2.f, (float(tune->geti()) + fine->get()) / 12.f) * sr_ratio[size_t(cur.load())];
+        float srr = sr_ratio[size_t(cur.load())];
+        float tr = std::pow(2.f, (float(tune->geti()) + fine->get()) / 12.f) * srr;
         float out = 0;
+        if (mode->geti()) { // keep tempo: granular pitch shift, time pointer runs at 1x
+          constexpr float L = 0.08f * kSR; // grain length (80 ms), 2 Hann grains at 50% overlap
+          double len = std::max(1.0, s1 - s0);
+          auto rd = [&](double p) -> float {
+            if (p >= s1) {
+              if (!lp) return 0.f;
+              p = s0 + std::fmod(p - s0, len);
+            }
+            size_t i = size_t(p);
+            if (i + 1 >= b.size()) return 0.f;
+            float f = float(p - double(i));
+            return b[i] + (b[i + 1] - b[i]) * f;
+          };
+          for (auto& v : poly.v) {
+            if (!v.active()) continue;
+            if (v.tpos >= s1) {
+              if (lp) v.tpos = s0 + std::fmod(v.tpos - s0, len);
+              else { v.env.finish(); continue; }
+            }
+            double ratio = double(v.base / 261.63f * tr * freq_mul);
+            v.gph += 1.f / L;
+            if (v.gph >= 1) v.gph -= 1;
+            float x = 0;
+            for (size_t k = 0; k < 2; k++) {
+              float ph = std::fmod(v.gph + 0.5f * float(k), 1.f);
+              if (ph < v.gprev[k]) v.gstart[k] = v.tpos; // grain restarts at the current time
+              v.gprev[k] = ph;
+              float w = std::sin(kPi * ph);
+              x += rd(v.gstart[k] + double(ph) * L * ratio) * w * w;
+            }
+            out += x * v.env();
+            v.tpos += double(srr);
+          }
+          return out * 0.5f;
+        }
         for (auto& v : poly.v) {
           if (!v.active()) continue;
           if (v.pos >= s1) {

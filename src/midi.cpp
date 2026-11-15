@@ -76,6 +76,9 @@ namespace otto {
     else if (a == "note_rec") st.note_rec = !st.note_rec;
     else if (a == "preset_next") st.preset_nav += 1;
     else if (a == "preset_prev") st.preset_nav -= 1;
+    else if (a == "sample_zoom") st.sample_zoom_press();
+    else if (a == "sample_next") st.sample_nav += 1;
+    else if (a == "sample_prev") st.sample_nav -= 1;
   }
 
   void Midi::on_msg(const unsigned char* m, size_t n)
@@ -156,7 +159,7 @@ namespace otto {
   bool Midi::load(const std::string& path)
   {
     path_ = path;
-    std::ifstream in(path);
+    std::ifstream in(u8path(path));
     if (!in) return false;
     auto j = nlohmann::json::parse(in, nullptr, false);
     if (j.is_discarded()) return false;
@@ -168,6 +171,25 @@ namespace otto {
     for (auto& b : j["cc"]) cc.push_back({b.value("ch", 0), b.value("cc", 0), b.value("target", ""), b.value("relative", false)});
     for (auto& b : j["notes"]) notes.push_back({b.value("ch", 0), b.value("note", 0), b.value("target", "")});
     return true;
+  }
+
+  void Midi::merge_defaults(const std::string& path)
+  {
+    std::ifstream in(path);
+    auto j = nlohmann::json::parse(in, nullptr, false);
+    if (!in || j.is_discarded()) return;
+    std::lock_guard lk(mtx);
+    // add default bindings whose CC/note the user has not bound yet (keeps learned mappings)
+    for (auto& b : j["cc"]) {
+      int num = b.value("cc", -1);
+      if (std::none_of(cc.begin(), cc.end(), [&](auto& x) { return x.num == num; }))
+        cc.push_back({b.value("ch", 0), num, b.value("target", ""), b.value("relative", false)});
+    }
+    for (auto& b : j["notes"]) {
+      int num = b.value("note", -1);
+      if (std::none_of(notes.begin(), notes.end(), [&](auto& x) { return x.num == num; }))
+        notes.push_back({b.value("ch", 0), num, b.value("target", "")});
+    }
   }
 
   bool Midi::save()

@@ -4,6 +4,7 @@
 #include <dr_wav.h>
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -108,6 +109,8 @@ namespace otto {
     loop_out = &R.add("tape.out", "Loop fin", 0, 1, 1);
     for (auto& m : melody)
       for (auto& n : m) n = -1;
+    smp_start = registry().find("smp.start");
+    smp_end = registry().find("smp.end");
   }
 
   void Studio::hit_pad(int pad, float vel)
@@ -318,6 +321,55 @@ namespace otto {
     }
   }
 
+  // ---------------- sampler zoom + session library ----------------
+  void Studio::sample_zoom_reset()
+  {
+    for (auto* p : {smp_start, smp_end}) {
+      p->view_lo = 0;
+      p->view_hi = 1;
+    }
+  }
+
+  void Studio::sample_zoom_press()
+  {
+    auto now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now - last_zoom_ms.exchange(now) < 400) { // double press -> whole sample
+      sample_zoom_reset();
+      last_zoom_ms = -100000;
+      return;
+    }
+    float s = smp_start->get(), e = smp_end->get();
+    if (e < s) std::swap(s, e);
+    float m = std::max((e - s) * 0.1f, 0.0005f); // 10% margin so the edges can still move outwards
+    float lo = std::max(0.f, s - m), hi = std::min(1.f, e + m);
+    for (auto* p : {smp_start, smp_end}) {
+      p->view_lo = lo;
+      p->view_hi = hi;
+    }
+  }
+
+  static void remember(std::vector<std::string>& pool, const std::string& path)
+  {
+    if (std::find(pool.begin(), pool.end(), path) == pool.end()) pool.push_back(path);
+  }
+
+  bool Studio::load_sampler(const std::string& path)
+  {
+    if (!sampler_load(*synths.back(), path)) return false;
+    sampler_path = path;
+    remember(sample_pool, path);
+    sample_zoom_reset();
+    return true;
+  }
+
+  bool Studio::load_pad(int pad, const std::string& path)
+  {
+    if (!drums.load_pad(pad, path)) return false;
+    pad_paths[size_t(pad)] = path;
+    remember(sample_pool, path);
+    return true;
+  }
+
   // ---------------- save / load ----------------
   bool Studio::save(const std::string& dir)
   {
@@ -326,6 +378,9 @@ namespace otto {
     fs::create_directories(u8path(dir), ec);
     nlohmann::json j;
     for (auto& p : registry().all) j["params"][p.id] = p.get();
+    j["samples"]["sampler"] = sampler_path;
+    j["samples"]["pads"] = pad_paths;
+    j["samples"]["pool"] = sample_pool;
     for (auto& pat : steps) {
       nlohmann::json row = nlohmann::json::array();
       for (auto& s : pat) row.push_back(s.load());
@@ -393,6 +448,14 @@ namespace otto {
       if (auto* p = registry().find(id); p && v.is_number()) p->set(v.get<float>());
     for (auto& pat : steps)
       for (auto& s : pat) s = 0;
+    if (j.contains("samples")) { // restore the session library and what each slot had loaded
+      auto& s = j["samples"];
+      for (auto& p : s.value("pool", std::vector<std::string>{})) remember(sample_pool, p);
+      if (auto sp = s.value("sampler", std::string{}); !sp.empty()) load_sampler(sp);
+      auto pads = s.value("pads", std::vector<std::string>{});
+      for (size_t i = 0; i < pads.size() && i < size_t(Drums::N); i++)
+        if (!pads[i].empty()) load_pad(int(i), pads[i]);
+    }
     for (auto& m : melody)
       for (auto& n : m) n = -1;
     if (j.contains("melody") && j["melody"].is_array())

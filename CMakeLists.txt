@@ -59,7 +59,7 @@ if(MSVC)
   target_compile_options(otto-op1 PRIVATE /utf-8 /fp:fast)
 endif()
 add_custom_command(TARGET otto-op1 POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/mapping.json $<TARGET_FILE_DIR:otto-op1>/mapping.json
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/mapping.json $<TARGET_FILE_DIR:otto-op1>/mapping.default.json
   COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:otto-op1>/samples)
 
 # ---- one runnable DSP check
