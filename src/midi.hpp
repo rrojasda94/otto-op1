@@ -23,6 +23,7 @@ namespace otto {
     void open_all();
     bool load(const std::string& path);
     bool save();
+    void merge_defaults(const std::string& path);
 
     std::mutex mtx; // guards everything below + Studio::midi_q producer side
     std::vector<std::string> ports;

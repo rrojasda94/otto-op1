@@ -354,22 +354,31 @@ static void draw_nuke(ImDrawList* dl, ImVec2 o, ImVec2 sz, float cutoff, float r
   dl->AddText({o.x + 10, o.y + 8}, kEngineCol[1], "FILTRO LADDER");
 }
 
-static void draw_wave(ImDrawList* dl, ImVec2 o, ImVec2 sz, const std::vector<float>& w, float s0, float s1, ImU32 col)
+static void draw_wave(ImDrawList* dl, ImVec2 o, ImVec2 sz, const std::vector<float>& w, float s0, float s1, float v0, float v1,
+                      ImU32 col)
 {
   float mid = o.y + sz.y * 0.55f;
   int cols = int(sz.x - 20);
+  double n = double(w.size()), span = std::max(1e-6, double(v1 - v0));
   for (int c = 0; c < cols && !w.empty(); c++) {
-    size_t a = w.size() * size_t(c) / size_t(cols), b = w.size() * size_t(c + 1) / size_t(cols);
+    double f0 = v0 + span * double(c) / cols, f1 = v0 + span * double(c + 1) / cols;
+    size_t a = std::min(w.size() - 1, size_t(f0 * n)), b = std::min(w.size(), std::max(a + 1, size_t(f1 * n)));
+    size_t stride = std::max<size_t>(1, (b - a) / 64); // ponytail: <=64 reads per column keeps long songs cheap
     float pk = 0;
-    for (size_t i = a; i < b; i += 7) pk = std::max(pk, std::abs(w[i]));
+    for (size_t i = a; i < b; i += stride) pk = std::max(pk, std::abs(w[i]));
     float x = o.x + 10 + float(c);
-    float fx = float(c) / float(cols);
-    ImU32 cc = (fx >= s0 && fx <= s1) ? col : kDim;
+    ImU32 cc = (f0 >= s0 && f0 <= s1) ? col : kDim;
     dl->AddLine({x, mid - pk * sz.y * 0.4f}, {x, mid + pk * sz.y * 0.4f}, cc);
   }
-  dl->AddLine({o.x + 10 + s0 * float(cols), o.y + 30}, {o.x + 10 + s0 * float(cols), o.y + sz.y - 8}, kEnc[0], 2);
-  dl->AddLine({o.x + 10 + s1 * float(cols), o.y + 30}, {o.x + 10 + s1 * float(cols), o.y + sz.y - 8}, kEnc[1], 2);
-  dl->AddText({o.x + 10, o.y + 8}, col, "SAMPLE");
+  auto px = [&](float f) { return o.x + 10 + float((f - v0) / span) * float(cols); };
+  if (s0 >= v0 && s0 <= v1) dl->AddLine({px(s0), o.y + 30}, {px(s0), o.y + sz.y - 8}, kEnc[0], 2);
+  if (s1 >= v0 && s1 <= v1) dl->AddLine({px(s1), o.y + 30}, {px(s1), o.y + sz.y - 8}, kEnc[1], 2);
+  char t[96];
+  double secs = n / kSR;
+  if (v0 > 0 || v1 < 1)
+    std::snprintf(t, sizeof t, "SAMPLE  ZOOM x%.0f   %.2fs - %.2fs", 1.0 / span, s0 * secs, s1 * secs);
+  else std::snprintf(t, sizeof t, "SAMPLE   %.2fs - %.2fs  de %.1fs", s0 * secs, s1 * secs, secs);
+  dl->AddText({o.x + 10, o.y + 8}, col, t);
 }
 
 static void draw_reel(ImDrawList* dl, ImVec2 c, float r_tape, float angle, ImU32 col)
@@ -544,7 +553,7 @@ static void screen(UI& u, float H)
   else if (eng.title == "STRING") draw_string(dl, z0, s0, u.energy, u.time);
   else if (eng.title == "CLUSTER") draw_cluster(dl, z0, s0, registry().find("cl.spread")->get(), u.energy, u.time);
   else if (auto* w = sampler_data(eng))
-    draw_wave(dl, z0, s0, *w, registry().find("smp.start")->get(), registry().find("smp.end")->get(), kEngineCol[4]);
+    draw_wave(dl, z0, s0, *w, st.smp_start->get(), st.smp_end->get(), st.smp_start->view_lo, st.smp_start->view_hi, kEngineCol[4]);
   dl->AddText({z0.x + 10, z0.y + s0.y - 22}, kDim, eng.pages[size_t(page)].c_str());
 
   // --- zone 2: cassette
@@ -710,7 +719,12 @@ static void pads(UI& u, ImVec2 size)
     if (ImGui::BeginPopupContextItem("padmenu")) {
       if (ImGui::MenuItem("Cargar sample...")) {
         auto path = open_audio_dialog();
-        if (!path.empty()) u.status = st.drums.load_pad(i, path) ? "Pad cargado" : "No se pudo leer el audio";
+        if (!path.empty()) u.status = st.load_pad(i, path) ? "Pad cargado" : "No se pudo leer el audio";
+      }
+      if (!st.sample_pool.empty() && ImGui::BeginMenu("Desde la sesion")) {
+        for (auto& p : st.sample_pool)
+          if (ImGui::MenuItem(utf8(u8path(p).filename()).c_str())) u.status = st.load_pad(i, p) ? "Pad cargado" : "No se pudo leer el audio";
+        ImGui::EndMenu();
       }
       ImGui::EndPopup();
     }
@@ -902,17 +916,33 @@ static void tab_engine(UI& u)
     ImGui::SetNextItemWidth(-120);
     ImGui::InputText("##wav", u.wav, sizeof u.wav);
     ImGui::SameLine();
-    if (ImGui::Button("Cargar", {-1, 0})) u.status = sampler_load(eng, u.wav) ? "Sample cargado" : "No se pudo leer el audio";
+    if (ImGui::Button("Cargar", {-1, 0})) u.status = st.load_sampler(u.wav) ? "Sample cargado" : "No se pudo leer el audio";
     if (ImGui::Button("Abrir archivo...")) {
       auto path = open_audio_dialog();
       if (!path.empty()) {
         std::snprintf(u.wav, sizeof u.wav, "%s", path.c_str());
-        u.status = sampler_load(eng, path) ? "Sample cargado" : "No se pudo leer el audio";
+        u.status = st.load_sampler(path) ? "Sample cargado" : "No se pudo leer el audio";
       }
     }
     ImGui::SameLine();
+    bool zoomed = st.smp_start->view_lo > 0 || st.smp_start->view_hi < 1;
+    if (pill(zoomed ? "ZOOM ON" : "ZOOM (CC118)", zoomed, kEngineCol[4], {130, 0})) st.sample_zoom_press();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ajusta la vista a Inicio-Fin para cortar fino. Doble clic = vista completa");
+    ImGui::SameLine();
     if (!u.status.empty()) ImGui::TextDisabled("%s", u.status.c_str());
     ImGui::TextDisabled("tip: arrastra un wav/mp3/flac a la ventana");
+    if (!st.sample_pool.empty()) {
+      ImGui::TextColored(ImColor(kEngineCol[4]), "SAMPLES DE LA SESION");
+      for (int i = 0; i < int(st.sample_pool.size()); i++) {
+        const auto& p = st.sample_pool[size_t(i)];
+        if (i % 4) ImGui::SameLine();
+        ImGui::PushID(2000 + i);
+        if (pill(utf8(u8path(p).filename()).substr(0, 22).c_str(), p == st.sampler_path, kEngineCol[4], {200, 0}))
+          u.status = st.load_sampler(p) ? "Sample cargado" : "No se pudo leer el audio";
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", p.c_str());
+        ImGui::PopID();
+      }
+    }
   }
   // presets
   if (u.presets_for != eng.title) refresh_presets(u);
@@ -994,7 +1024,7 @@ static void tab_io(UI& u)
   ImGui::SameLine();
   static const char* actions[] = {"play", "stop", "rec", "clear", "page_next", "page_prev", "synth_next", "arp",
                                   "track1", "track2", "track3", "track4", "tapestop", "reverse", "note_rec",
-                                  "preset_next", "preset_prev"};
+                                  "preset_next", "preset_prev", "sample_zoom", "sample_next", "sample_prev"};
   static int act = 0;
   ImGui::SetNextItemWidth(120);
   ImGui::Combo("##act", &act, actions, IM_ARRAYSIZE(actions));
@@ -1051,11 +1081,13 @@ int main(int argc, char** argv)
   gam::sampleRate(kSR);
   auto st = std::make_unique<Studio>();
   st->drums.load_dir((base / "samples").string());
-  if (fs::exists(base / "samples" / "sampler.wav")) sampler_load(*st->synths.back(), (base / "samples" / "sampler.wav").string());
+  if (fs::exists(base / "samples" / "sampler.wav")) st->load_sampler(utf8(base / "samples" / "sampler.wav"));
 
   Midi midi(*st);
   g_midi = &midi;
-  midi.load((base / "mapping.json").string());
+  // user mapping (learned controls) + any new default bindings it does not have yet
+  if (!midi.load(utf8(base / "mapping.json"))) midi.load(utf8(base / "mapping.default.json")), midi.save();
+  midi.merge_defaults(utf8(base / "mapping.default.json"));
   midi.open_all();
 
   Audio audio;
@@ -1119,13 +1151,13 @@ int main(int argc, char** argv)
     for (int i = 0; i < 8; i++) {
       auto r = g_ui->pad_rect[size_t(i)];
       if (mx >= r.x && mx < r.z && my >= r.y && my < r.w) {
-        g_ui->status = g_ui->st.drums.load_pad(i, paths[0]) ? "Pad cargado (arrastrado)" : "No se pudo leer el audio";
+        g_ui->status = g_ui->st.load_pad(i, paths[0]) ? "Pad cargado (arrastrado)" : "No se pudo leer el audio";
         return;
       }
     }
     std::snprintf(g_ui->wav, sizeof g_ui->wav, "%s", paths[0]);
     g_ui->st.synth_sel->set(float(g_ui->st.synths.size() - 1));
-    g_ui->status = sampler_load(*g_ui->st.synths.back(), paths[0]) ? "Sample cargado (arrastrado)" : "No se pudo leer el audio";
+    g_ui->status = g_ui->st.load_sampler(paths[0]) ? "Sample cargado (arrastrado)" : "No se pudo leer el audio";
   });
 
   const ImGuiKey piano[] = {ImGuiKey_A, ImGuiKey_W, ImGuiKey_S, ImGuiKey_E, ImGuiKey_D, ImGuiKey_F, ImGuiKey_T, ImGuiKey_G,
@@ -1171,6 +1203,13 @@ int main(int argc, char** argv)
         ui.preset_idx = ((ui.preset_idx + nav) % n + n) % n;
         load_preset(ui, ui.presets[size_t(ui.preset_idx)]);
       }
+    }
+    if (int nav = st->sample_nav.exchange(0); nav != 0 && !st->sample_pool.empty()) {
+      auto& pool = st->sample_pool;
+      int n = int(pool.size());
+      int i = int(std::find(pool.begin(), pool.end(), st->sampler_path) - pool.begin());
+      i = i >= n ? 0 : ((i + nav) % n + n) % n;
+      ui.status = st->load_sampler(pool[size_t(i)]) ? "Sample: " + utf8(u8path(pool[size_t(i)]).filename()) : "No se pudo leer el audio";
     }
     header(ui);
     screen(ui, std::clamp(float(h) * 0.30f, 220.f, 320.f));

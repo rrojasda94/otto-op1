@@ -2,6 +2,7 @@
 #include "core.hpp"
 
 #include <Gamma/Domain.h>
+#include <dr_wav.h>
 
 #undef NDEBUG // keep asserts in Release builds
 #include <cassert>
@@ -110,6 +111,52 @@ int main()
   size_t p1 = st->tape_pos;
   assert((p1 < p0 || p1 > p0 + 1000) && "reverse moves the head backwards (or wraps)");
   st->tape_rev->set(0);
+
+  // zoom: knob range follows [start,end]; two quick presses restore the full view
+  st->smp_start->set(0.40f);
+  st->smp_end->set(0.50f);
+  st->sample_zoom_press();
+  assert(st->smp_start->view_lo > 0.38f && st->smp_start->view_hi < 0.52f && "zoom fits the selection");
+  st->smp_start->set_norm(1.f); // full knob turn now only spans the zoomed window
+  assert(st->smp_start->get() < 0.52f && "knob is fine-grained while zoomed");
+  st->sample_zoom_press(); // second press within 400 ms
+  assert(st->smp_start->view_lo == 0.f && st->smp_start->view_hi == 1.f && "double press resets the view");
+
+  // keep-tempo sampler: a note two octaves down lasts as long as the sample, not 4x longer
+  {
+    std::vector<float> tone(size_t(kSR * 0.5f));
+    for (size_t i = 0; i < tone.size(); i++) tone[i] = 0.5f * std::sin(2 * kPi * 261.63f * float(i) / kSR);
+    auto tw = (std::filesystem::temp_directory_path() / "otto_tone.wav").string();
+    drwav_data_format f{drwav_container_riff, DR_WAVE_FORMAT_IEEE_FLOAT, 1, unsigned(kSR), 32};
+    drwav w;
+    assert(drwav_init_file_write(&w, tw.c_str(), &f, nullptr));
+    drwav_write_pcm_frames(&w, tone.size(), tone.data());
+    drwav_uninit(&w);
+    assert(st->load_sampler(tw));
+    std::filesystem::remove(tw);
+    auto& smp = *st->synths.back();
+    st->smp_start->set(0);
+    st->smp_end->set(1);
+    registry().find("smp.loop")->set(0);
+    registry().find("smp.r")->set(0);
+    auto duration = [&](bool keep) {
+      registry().find("smp.keep")->set(keep ? 1.f : 0.f);
+      smp.update();
+      smp.note_on(36, 1); // C2 = two octaves below the C4 root
+      int last = 0;
+      for (int i = 0; i < int(kSR * 3); i++) {
+        if (i % 64 == 0) smp.update();
+        if (std::abs(smp.process()) > 1e-3f) last = i;
+      }
+      smp.note_off(36);
+      return float(last) / kSR;
+    };
+    float keep = duration(true), classic = duration(false);
+    std::printf("C2 duration: keep-tempo %.2fs, classic %.2fs\n", keep, classic);
+    assert(keep > 0.4f && keep < 0.65f && "keep-tempo plays the sample at its real length");
+    assert(classic > 1.8f && "classic mode slows down with pitch");
+  }
+  assert(!st->sample_pool.empty() && "loaded files land in the session library");
 
   // tape stop halts transport after the slow-down
   st->ui_q.push({Ev::TapeStop});

@@ -81,6 +81,7 @@ namespace otto {
     int page;
     bool integer;
     std::atomic<float> val;
+    std::atomic<float> view_lo{0}, view_hi{1}; // fraction of [min,max] that knobs/CCs/relative encoders cover
     Param(std::string id_, std::string name_, float mn, float mx, float d, int pg, bool in)
       : id(std::move(id_)), name(std::move(name_)), min(mn), max(mx), def(d), page(pg), integer(in), val(d)
     {}
@@ -92,8 +93,19 @@ namespace otto {
       if (integer) v = std::round(v);
       val.store(v, std::memory_order_relaxed);
     }
-    void set_norm(float n) { set(min + std::clamp(n, 0.f, 1.f) * (max - min)); }
-    float norm() const { return max > min ? (get() - min) / (max - min) : 0.f; }
+    void set_norm(float n)
+    {
+      float lo = view_lo.load(), hi = view_hi.load();
+      set(min + (lo + std::clamp(n, 0.f, 1.f) * (hi - lo)) * (max - min));
+    }
+    /// position inside the current view window, 0..1
+    float norm() const
+    {
+      if (max <= min) return 0.f;
+      float lo = view_lo.load(), hi = view_hi.load();
+      float f = (get() - min) / (max - min);
+      return hi > lo ? std::clamp((f - lo) / (hi - lo), 0.f, 1.f) : 0.f;
+    }
   };
 
   struct Registry {
@@ -300,6 +312,20 @@ namespace otto {
     Param *tape_speed, *tape_rev, *loop_in, *loop_out;
     std::atomic<bool> tape_stopping{false};
     std::atomic<int> preset_nav{0}; // +1/-1 requested by MIDI, consumed by the UI
+    std::atomic<int> sample_nav{0}; // +1/-1 through the session sample library, consumed by the UI
+
+    // SAMPLER zoom: one press = view fits [start,end], two quick presses = full sample
+    Param *smp_start = nullptr, *smp_end = nullptr;
+    void sample_zoom_press();
+    void sample_zoom_reset();
+    std::atomic<int64_t> last_zoom_ms{-100000};
+
+    // Session sample library (UI thread only): every file loaded this session, saved with the project
+    std::vector<std::string> sample_pool;
+    std::string sampler_path;
+    std::array<std::string, Drums::N> pad_paths;
+    bool load_sampler(const std::string& utf8_path);
+    bool load_pad(int pad, const std::string& utf8_path);
     std::atomic<bool> step_rec{false};
     // for the UI: hit counters per pad, held keys bitmask, oscilloscope ring
     std::array<std::atomic<uint32_t>, Drums::N> pad_hits{};
