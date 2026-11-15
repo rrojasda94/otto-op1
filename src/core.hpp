@@ -137,6 +137,13 @@ namespace otto {
 
   std::unique_ptr<Engine> make_ottofm();
   std::unique_ptr<Engine> make_nuke();
+  std::unique_ptr<Engine> make_string();
+  std::unique_ptr<Engine> make_cluster();
+  std::unique_ptr<Engine> make_sampler();
+  /// Load a WAV into the SAMPLER engine (UI thread). false if not a sampler or unreadable.
+  bool sampler_load(Engine& e, const std::string& path);
+  /// Current sample data of a SAMPLER engine, nullptr otherwise (for drawing)
+  const std::vector<float>* sampler_data(Engine& e);
 
   // ---------- drum sampler (8 pads) ----------
   struct Drums {
@@ -261,15 +268,29 @@ namespace otto {
     std::atomic<int> page{0};
     std::atomic<float> peak{0};
 
+    // 16-step drum pattern per pad (bit i = step i); pads record into it while playing + step_rec
+    std::array<std::atomic<uint16_t>, Drums::N> steps{};
+    std::atomic<bool> step_rec{false};
+    // for the UI: hit counters per pad, held keys bitmask, oscilloscope ring
+    std::array<std::atomic<uint32_t>, Drums::N> pad_hits{};
+    std::array<std::atomic<uint64_t>, 2> held{};
+    static constexpr size_t kScope = 1024;
+    std::array<std::atomic<float>, kScope> scope{};
+    std::atomic<uint32_t> scope_w{0};
+
     Studio();
     Engine& synth() { return *synths[size_t(synth_sel->geti())]; }
     void process(float* out_interleaved, unsigned frames);
 
     bool save(const std::string& dir);
     bool load(const std::string& dir);
+    /// Render the 4 tape tracks (faders, mutes, master) to one stereo WAV
+    bool export_mix(const std::string& path);
 
   private:
     void handle(const Ev& e);
+    void hit_pad(int pad, float vel);
+    void set_held(int note, bool on);
     int cur_synth = 0;
     float bend = 0, vib_ph = 0;
     bool arp_was_on = false;

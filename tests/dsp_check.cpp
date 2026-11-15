@@ -6,6 +6,7 @@
 #undef NDEBUG // keep asserts in Release builds
 #include <cassert>
 #include <cstdio>
+#include <filesystem>
 
 using namespace otto;
 
@@ -57,6 +58,15 @@ int main()
   assert(peak > 0.01f && taped > 0.01f);
 
   assert(Euclid::hit(0, 16, 4, 0) && !Euclid::hit(1, 16, 4, 0) && Euclid::hit(4, 16, 4, 0));
+
+  // step pattern triggers pads; mix export writes a file
+  st->steps[5] = 0xFFFF; // tom on every 16th
+  uint32_t before = st->pad_hits[5];
+  for (int b = 0; b < 40; b++) st->process(buf.data(), 256); // ~0.2 s at 120 bpm = 1.6 steps
+  assert(st->pad_hits[5] > before && "step sequencer hits pad");
+  auto wav = (std::filesystem::temp_directory_path() / "otto_mix_check.wav").string();
+  assert(st->export_mix(wav) && std::filesystem::file_size(wav) > 1000);
+  std::filesystem::remove(wav);
   std::puts("OK");
   return 0;
 }
