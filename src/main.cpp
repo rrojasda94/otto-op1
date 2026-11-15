@@ -9,8 +9,11 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
+#include <nlohmann/json.hpp>
+
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 
 using namespace otto;
 namespace fs = std::filesystem;
@@ -43,20 +46,58 @@ struct Audio {
   std::vector<unsigned> ids;
   std::vector<std::string> names;
   int dev_i = 0;
-  unsigned buffer = 256;
+  unsigned buffer = 128;
   std::string status;
+  std::string settings_path;
 
   static int cb(void* out, void*, unsigned n, double, RtAudioStreamStatus, void* user)
   {
     static_cast<Studio*>(user)->process(static_cast<float*>(out), n);
     return 0;
   }
-  void init()
+  int api_index(RtAudio::Api a) const
   {
-    RtAudio::getCompiledApi(apis);
     for (size_t i = 0; i < apis.size(); i++)
-      if (apis[i] == RtAudio::WINDOWS_WASAPI) api_i = int(i);
+      if (apis[i] == a) return int(i);
+    return -1;
+  }
+  bool select_device(const std::string& name)
+  {
+    for (size_t i = 0; i < names.size(); i++)
+      if (names[i] == name) { dev_i = int(i); return true; }
+    return false;
+  }
+  /// Remembered choice, else ASIO (low latency; prefers "FL Studio ASIO") with WASAPI fallback
+  void start(const std::string& path)
+  {
+    settings_path = path;
+    RtAudio::getCompiledApi(apis);
+    std::ifstream in(path);
+    auto j = nlohmann::json::parse(in, nullptr, false);
+    if (in && !j.is_discarded()) {
+      buffer = j.value("buffer", buffer);
+      for (size_t i = 0; i < apis.size(); i++)
+        if (RtAudio::getApiName(apis[i]) == j.value("api", "")) api_i = int(i);
+      scan();
+      select_device(j.value("device", ""));
+      if (open()) return;
+    }
+    if (int a = api_index(RtAudio::WINDOWS_ASIO); a >= 0) {
+      api_i = a;
+      scan();
+      for (const char* pref : {"FL Studio ASIO", "ASIO4ALL v2"})
+        if (select_device(pref)) break;
+      if (open()) return;
+    }
+    api_i = std::max(0, api_index(RtAudio::WINDOWS_WASAPI));
     scan();
+    open();
+  }
+  void remember()
+  {
+    if (settings_path.empty() || names.empty()) return;
+    nlohmann::json j{{"api", RtAudio::getApiName(apis[size_t(api_i)])}, {"device", names[size_t(dev_i)]}, {"buffer", buffer}};
+    std::ofstream(settings_path) << j.dump(2);
   }
   void scan()
   {
@@ -625,7 +666,7 @@ static void tab_sequence(UI& u)
   if (ImGui::IsItemHovered()) ImGui::SetTooltip("Con PLAY activo, lo que toques en los pads se graba cuantizado a 1/16");
   ImGui::SameLine();
   if (ImGui::Button("Borrar patron"))
-    for (auto& s : st.steps) s = 0;
+    for (auto& s : st.cur_steps()) s = 0;
   ImGui::SameLine();
   ImGui::TextDisabled("clic en la grilla para activar pasos");
 
@@ -636,10 +677,10 @@ static void tab_sequence(UI& u)
     dl->AddText({o.x, o.y + float(p) * (chh + 3) + 2}, kPadCol[p], kPadNames[p]);
     for (int s = 0; s < 16; s++) {
       ImVec2 a{o.x + 64 + float(s) * cw, o.y + float(p) * (chh + 3)}, b{a.x + cw - 3, a.y + chh};
-      bool on = (st.steps[size_t(p)].load() >> s) & 1;
+      bool on = (st.cur_steps()[size_t(p)].load() >> s) & 1;
       ImGui::SetCursorScreenPos(a);
       ImGui::PushID(p * 16 + s);
-      if (ImGui::InvisibleButton("st", {cw - 3, chh})) st.steps[size_t(p)].fetch_xor(uint16_t(1u << s));
+      if (ImGui::InvisibleButton("st", {cw - 3, chh})) st.cur_steps()[size_t(p)].fetch_xor(uint16_t(1u << s));
       ImGui::PopID();
       ImU32 c = on ? kPadCol[p] : (s % 4 == 0 ? IM_COL32(44, 44, 50, 255) : IM_COL32(34, 34, 40, 255));
       if (s == cur) c = on ? IM_COL32(255, 255, 255, 255) : IM_COL32(70, 70, 80, 255);
@@ -651,7 +692,7 @@ static void tab_sequence(UI& u)
   if (ImGui::CollapsingHeader("Euclid (4 canales)")) {
     if (ImGui::BeginTable("euc", 5, ImGuiTableFlags_SizingStretchSame)) {
       for (int c = 0; c < Euclid::C; c++) {
-        auto& ch = st.euclid.ch[size_t(c)];
+        auto& ch = st.cur_euclid().ch[size_t(c)];
         ImGui::TableNextRow();
         ImGui::TableNextColumn();
         ImVec2 p = ImGui::GetCursorScreenPos();
@@ -755,7 +796,7 @@ static void tab_io(UI& u)
       if (ImGui::Selectable(RtAudio::getApiDisplayName(audio.apis[size_t(i)]).c_str(), i == audio.api_i)) {
         audio.api_i = i;
         audio.scan();
-        audio.open();
+        if (audio.open()) audio.remember();
       }
     ImGui::EndCombo();
   }
@@ -765,7 +806,7 @@ static void tab_io(UI& u)
     for (int i = 0; i < int(audio.names.size()); i++)
       if (ImGui::Selectable(audio.names[size_t(i)].c_str(), i == audio.dev_i)) {
         audio.dev_i = i;
-        audio.open();
+        if (audio.open()) audio.remember();
       }
     ImGui::EndCombo();
   }
@@ -777,9 +818,10 @@ static void tab_io(UI& u)
   ImGui::SetNextItemWidth(90);
   if (ImGui::Combo("Buffer", &idx, "64\0128\0256\0512\01024\0")) {
     audio.buffer = sizes[idx];
-    audio.open();
+    if (audio.open()) audio.remember();
   }
   ImGui::TextDisabled("%s", audio.status.c_str());
+  ImGui::TextDisabled("Menor latencia: API asio + FL Studio ASIO o ASIO4ALL, buffer 64-128. WASAPI suma ~10-20 ms.");
   ImGui::Separator();
   {
     std::lock_guard lk(midi.mtx);
@@ -865,8 +907,9 @@ int main(int argc, char** argv)
 
   Audio audio;
   audio.st = st.get();
-  audio.init();
-  audio.open();
+  audio.start((base / "audio.json").string());
+  std::printf("audio: %s [%s]\n", audio.status.c_str(), RtAudio::getApiName(audio.apis[size_t(audio.api_i)]).c_str());
+  std::fflush(stdout);
 
   if (!glfwInit()) return 1;
   glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -999,7 +1042,7 @@ int main(int argc, char** argv)
       st->ui_q.push({Ev::Play});
       st->ui_q.push({Ev::NoteOn, 60, 0.9f});
       st->ui_q.push({Ev::Drum, 0, 0.9f});
-      st->steps[2] = 0x5555;
+      st->cur_steps()[2] = 0x5555;
     }
   }
 

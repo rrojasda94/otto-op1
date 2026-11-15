@@ -220,7 +220,7 @@ namespace otto {
       Param *len, *hits, *rot, *pad;
     };
     std::array<Ch, C> ch;
-    Euclid();
+    explicit Euclid(const std::string& prefix);
     static bool hit(int step, int len, int hits, int rot)
     {
       if (len <= 0 || hits <= 0) return false;
@@ -256,7 +256,6 @@ namespace otto {
     PingDelay delay;
     Wormhole reverb;
     Arp arp;
-    Euclid euclid;
     Tape tape;
 
     Param *synth_sel, *bpm, *bars, *mod, *master, *rec_track, *bend_range;
@@ -268,8 +267,14 @@ namespace otto {
     std::atomic<int> page{0};
     std::atomic<float> peak{0};
 
-    // 16-step drum pattern per pad (bit i = step i); pads record into it while playing + step_rec
-    std::array<std::atomic<uint16_t>, Drums::N> steps{};
+    // Each module (synth slot) owns its own drum pattern + Euclid; only the selected module's sequence plays.
+    static constexpr int kMods = 5;
+    using Pattern = std::array<std::atomic<uint16_t>, Drums::N>; // bit i = step i
+    std::array<Pattern, kMods> steps{};
+    std::vector<Euclid> euclids;
+    int mod_index() const { return std::clamp(synth_sel->geti(), 0, kMods - 1); }
+    Pattern& cur_steps() { return steps[size_t(mod_index())]; }
+    Euclid& cur_euclid() { return euclids[size_t(mod_index())]; }
     std::atomic<bool> step_rec{false};
     // for the UI: hit counters per pad, held keys bitmask, oscilloscope ring
     std::array<std::atomic<uint32_t>, Drums::N> pad_hits{};
