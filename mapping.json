@@ -1,0 +1,30 @@
+{
+  "_comment": "Arturia MiniLab 3 (valores de fabrica medidos). Canales 1-16, 0 = cualquiera. Si un control no responde, mira el monitor MIDI y usa 'L' (learn) en la app. relative=true para encoders en modo relativo.",
+  "drum_channel": 10,
+  "drum_base_note": 36,
+  "cc": [
+    { "ch": 0, "cc": 86, "target": "enc1" },
+    { "ch": 0, "cc": 87, "target": "enc2" },
+    { "ch": 0, "cc": 89, "target": "enc3" },
+    { "ch": 0, "cc": 90, "target": "enc4" },
+    { "ch": 0, "cc": 110, "target": "fx.rev.mix" },
+    { "ch": 0, "cc": 111, "target": "fx.rev.length" },
+    { "ch": 0, "cc": 116, "target": "fx.rev.shape" },
+    { "ch": 0, "cc": 117, "target": "fx.delay.mix" },
+    { "ch": 0, "cc": 14, "target": "tape.vol1" },
+    { "ch": 0, "cc": 15, "target": "tape.vol2" },
+    { "ch": 0, "cc": 30, "target": "tape.vol3" },
+    { "ch": 0, "cc": 31, "target": "tape.vol4" },
+    { "ch": 0, "cc": 1,  "target": "studio.mod" }
+  ],
+  "notes": [
+    { "ch": 10, "note": 44, "target": "action:play" },
+    { "ch": 10, "note": 45, "target": "action:rec" },
+    { "ch": 10, "note": 46, "target": "action:track1" },
+    { "ch": 10, "note": 47, "target": "action:track2" },
+    { "ch": 10, "note": 48, "target": "action:track3" },
+    { "ch": 10, "note": 49, "target": "action:track4" },
+    { "ch": 10, "note": 50, "target": "action:page_prev" },
+    { "ch": 10, "note": 51, "target": "action:page_next" }
+  ]
+}
